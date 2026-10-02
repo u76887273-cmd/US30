@@ -1,0 +1,7 @@
+pandas
+numpy
+scikit-learn
+joblib
+ctrader-open-api
+psycopg[binary]
+python-dotenv
