@@ -1,0 +1,32 @@
+# Secrets
+.env
+*.env
+ctrader_credentials.json
+service_account.json
+credentials.json
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Local / temporary files
+.DS_Store
+*.log
+
+# Google Colab
+.ipynb_checkpoints/
+
+# Model files
+*.joblib
+*.pkl
+
+# Local virtual environments
+.venv/
+venv/
+env/
