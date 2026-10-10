@@ -8,6 +8,12 @@ on:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: .
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      CTRADER_CLIENT_ID: ${{ secrets.CTRADER_CLIENT_ID }}
+      CTRADER_CLIENT_SECRET: ${{ secrets.CTRADER_CLIENT_SECRET }}
+      CTRADER_ACCESS_TOKEN: ${{ secrets.CTRADER_ACCESS_TOKEN }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -22,16 +28,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run Data Update
-        env:
-          PYTHONPATH: .
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          CTRADER_CLIENT_ID: ${{ secrets.CTRADER_CLIENT_ID }}
-          CTRADER_CLIENT_SECRET: ${{ secrets.CTRADER_CLIENT_SECRET }}
-          CTRADER_ACCESS_TOKEN: ${{ secrets.CTRADER_ACCESS_TOKEN }}
         run: python src/data.py
 
       - name: Run Prediction Engine
-        env:
-          PYTHONPATH: .
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python src/predict.py
