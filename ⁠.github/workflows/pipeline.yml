@@ -1,0 +1,35 @@
+name: US30 Quantum Live Engine
+on:
+schedule:
+- cron: '*/5 * * * *' # Runs automatically every 5 minutes
+workflow_dispatch: # Allows you to manually trigger the script with a button
+jobs:
+run-pipeline:
+runs-on: ubuntu-latest
+steps:
+- name: Checkout Repository
+uses: actions/checkout@v4
+- name: Set up Python
+uses: actions/setup-python@v5
+with:
+python-version: '3.10'
+cache: 'pip'
+- name: Install Dependencies
+run: |
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+- name: Run Data Update (cTrader -> Supabase)
+env:
+DATABASE_URL: ${{ secrets.DATABASE_URL }}
+CTRADER_CLIENT_ID: ${{ secrets.CTRADER_CLIENT_ID }}
+CTRADER_CLIENT_SECRET: ${{ secrets.CTRADER_CLIENT_SECRET }}
+CTRADER_ACCESS_TOKEN: ${{ secrets.CTRADER_ACCESS_TOKEN }}
+run: |
+export PYTHONPATH=PYTHONPATH:(pwd)
+python src/data.py
+- name: Run Prediction Engine
+env:
+DATABASE_URL: ${{ secrets.DATABASE_URL }}
+run: |
+export PYTHONPATH=￼(pwd)
+python src/predict.py
