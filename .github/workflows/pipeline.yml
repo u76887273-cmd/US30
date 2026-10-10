@@ -1,31 +1,37 @@
 name: US30 Quantum Live Engine
+
 on:
-schedule:
-- cron: '*/5 * * * *'
-workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
 jobs:
-run-pipeline:
-runs-on: ubuntu-latest
-steps:
-- name: Checkout Repository
-uses: actions/checkout@v4
-- name: Set up Python
-uses: actions/setup-python@v5
-with:
-python-version: '3.10'
-cache: 'pip'
-- name: Install Dependencies
-run: pip install -r requirements.txt
-- name: Run Data Update
-env:
-PYTHONPATH: .
-DATABASE_URL: ${{ secrets.DATABASE_URL }}
-CTRADER_CLIENT_ID: ${{ secrets.CTRADER_CLIENT_ID }}
-CTRADER_CLIENT_SECRET: ${{ secrets.CTRADER_CLIENT_SECRET }}
-CTRADER_ACCESS_TOKEN: ${{ secrets.CTRADER_ACCESS_TOKEN }}
-run: python src/data.py
-- name: Run Prediction Engine
-env:
-PYTHONPATH: .
-DATABASE_URL: ${{ secrets.DATABASE_URL }}
-run: python src/predict.py
+  run-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Data Update
+        env:
+          PYTHONPATH: .
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CTRADER_CLIENT_ID: ${{ secrets.CTRADER_CLIENT_ID }}
+          CTRADER_CLIENT_SECRET: ${{ secrets.CTRADER_CLIENT_SECRET }}
+          CTRADER_ACCESS_TOKEN: ${{ secrets.CTRADER_ACCESS_TOKEN }}
+        run: python src/data.py
+
+      - name: Run Prediction Engine
+        env:
+          PYTHONPATH: .
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python src/predict.py
