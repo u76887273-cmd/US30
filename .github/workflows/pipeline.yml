@@ -25,11 +25,11 @@ CTRADER_CLIENT_ID: ${{ secrets.CTRADER_CLIENT_ID }}
 CTRADER_CLIENT_SECRET: ${{ secrets.CTRADER_CLIENT_SECRET }}
 CTRADER_ACCESS_TOKEN: ${{ secrets.CTRADER_ACCESS_TOKEN }}
 run: |
-export PYTHONPATH=￼(pwd)
+export PYTHONPATH=\bm{PYTHONPATH:}(pwd)
 python src/data.py
 - name: Run Prediction Engine
 env:
 DATABASE_URL: ${{ secrets.DATABASE_URL }}
 run: |
-export PYTHONPATH=￼(pwd)
+export PYTHONPATH=\bm{PYTHONPATH:}(pwd)
 python src/predict.py
