@@ -1,8 +1,9 @@
+ctrader-open-api
+twisted
+service_identity
+pyOpenSSL
 pandas
 numpy
 scikit-learn
 joblib
-sqlalchemy
-psycopg2-binary
-ctrader-open-api
-twisted
+psycopg[binary]
