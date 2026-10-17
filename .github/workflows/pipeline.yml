@@ -18,8 +18,8 @@
         "CTRADER_CLIENT_ID": "${{ secrets.CTRADER_CLIENT_ID }}",
         "CTRADER_CLIENT_SECRET": "${{ secrets.CTRADER_CLIENT_SECRET }}",
         "CTRADER_ACCESS_TOKEN": "${{ secrets.CTRADER_ACCESS_TOKEN }}",
-        "ACCOUNT_ID": "${{ secrets.ACCOUNT_ID }}",
-        "SYMBOL_ID": "${{ secrets.SYMBOL_ID }}",
+        "ACCOUNT_ID": "25145646",
+        "SYMBOL_ID": "1287",
         "TELEGRAM_BOT_TOKEN": "${{ secrets.TELEGRAM_BOT_TOKEN }}",
         "TELEGRAM_CHAT_ID": "${{ secrets.TELEGRAM_CHAT_ID }}"
       },
