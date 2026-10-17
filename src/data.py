@@ -11,14 +11,16 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import *
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import *
 
 # ============================================================
-# 1. LOAD CREDENTIALS FROM GITHUB SECRETS
+# 1. LOAD CREDENTIALS FROM GITHUB SECRETS (+ US30 DEFAULTS)
 # ============================================================
 DATABASE_URL = os.environ.get("DATABASE_URL")
 CTRADER_CLIENT_ID = os.environ.get("CTRADER_CLIENT_ID")
 CTRADER_CLIENT_SECRET = os.environ.get("CTRADER_CLIENT_SECRET")
 CTRADER_ACCESS_TOKEN = os.environ.get("CTRADER_ACCESS_TOKEN")
-ACCOUNT_ID = int(os.environ.get("ACCOUNT_ID", 0))
-SYMBOL_ID = int(os.environ.get("SYMBOL_ID", 0))
+
+# Built-in defaults from your US30 config.py (25145646 & 1287)
+ACCOUNT_ID = int(os.environ.get("ACCOUNT_ID") or 25145646)
+SYMBOL_ID = int(os.environ.get("SYMBOL_ID") or 1287)
 
 if not all([DATABASE_URL, CTRADER_CLIENT_ID, CTRADER_CLIENT_SECRET, CTRADER_ACCESS_TOKEN, ACCOUNT_ID, SYMBOL_ID]):
     print("ERROR: Missing one or more required environment variables/secrets.")
