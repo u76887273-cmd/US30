@@ -10,7 +10,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error
 
 # ============================================================
-# US30 QUANTUM SUPREME — AUTOMATED AI MODEL TRAINER (ONCE PER DAY)
+# QUANTUM SUPREME — AUTOMATED AI MODEL TRAINER (ONCE PER DAY)
 # ============================================================
 
 MODEL_DIR = "models"
@@ -25,20 +25,21 @@ if os.path.exists(LAST_TRAINED_FILE):
     with open(LAST_TRAINED_FILE, "r") as f:
         last_trained = f.read().strip()
     if last_trained == TODAY_UTC:
-        print(f"US30 AI models already trained today ({TODAY_UTC}). Skipping training.")
+        print(f"AI models already trained today ({TODAY_UTC}). Skipping training.")
         sys.exit(0)
 
-print(f"Starting daily US30 AI model training for {TODAY_UTC}...")
+print(f"Starting daily AI model training for {TODAY_UTC}...")
 
+# Retrieve database connection string from environment variables
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     print("ERROR: DATABASE_URL environment variable is missing.")
     sys.exit(1)
 
 # ------------------------------------------------------------
-# 1. FETCH ALL HISTORICAL DATA FROM SUPABASE (m5_bars)
+# 1. FETCH ALL HISTORICAL DATA FROM SUPABASE
 # ------------------------------------------------------------
-print("Connecting to US30 Supabase database...")
+print("Connecting to Supabase database...")
 try:
     conn = psycopg.connect(DATABASE_URL)
     cur = conn.cursor()
@@ -57,7 +58,7 @@ if not data or len(data) < 200:
     sys.exit(0)
 
 bars = pd.DataFrame(data, columns=columns)
-bars["timestamp"] = pd.to_datetime(bars["timestamp"], utc=True)
+bars["timestamp"] = pd.to_datetime(bars["timestamp"], format="mixed", utc=True)
 bars = bars.sort_values("timestamp").drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
 print(f"Loaded {len(bars):,} historical 5-minute candles.")
 
@@ -66,19 +67,23 @@ print(f"Loaded {len(bars):,} historical 5-minute candles.")
 # ------------------------------------------------------------
 print("Engineering 31 AI features across historical dataset...")
 
+# Percentage Returns (3)
 bars["return_1"] = bars["close"].pct_change(1) * 100
 bars["return_3"] = bars["close"].pct_change(3) * 100
 bars["return_6"] = bars["close"].pct_change(6) * 100
 
+# Candle Shapes (3)
 bars["body"] = bars["close"] - bars["open"]
 bars["upper_wick"] = bars["high"] - bars[["open", "close"]].max(axis=1)
 bars["lower_wick"] = bars[["open", "close"]].min(axis=1) - bars["low"]
 
+# Exponential Moving Averages (4)
 bars["ema20"] = bars["close"].ewm(span=20, adjust=False).mean()
 bars["ema50"] = bars["close"].ewm(span=50, adjust=False).mean()
 bars["ema_gap"] = bars["ema20"] - bars["ema50"]
 bars["ema20_slope"] = bars["ema20"].diff()
 
+# Volatility / ATR (3)
 bars["prev_close"] = bars["close"].shift(1)
 bars["tr1"] = bars["high"] - bars["low"]
 bars["tr2"] = (bars["high"] - bars["prev_close"]).abs()
@@ -88,12 +93,14 @@ bars["atr14"] = bars["tr"].rolling(14).mean()
 bars["atr50"] = bars["tr"].rolling(50).mean()
 bars["relative_atr"] = bars["atr14"] / bars["atr50"]
 
+# Momentum / RSI 14 (1)
 delta = bars["close"].diff()
 gain = delta.clip(lower=0).rolling(14).mean()
 loss = (-delta.clip(upper=0)).rolling(14).mean()
 rs = gain / loss.replace(0, np.nan)
 bars["rsi14"] = 100 - (100 / (1 + rs))
 
+# Daily VWAP (2)
 bars["date"] = bars["timestamp"].dt.date
 bars["typical_price"] = (bars["high"] + bars["low"] + bars["close"]) / 3
 cum_vp = (bars["typical_price"] * bars["volume"]).groupby(bars["date"]).cumsum()
@@ -101,6 +108,7 @@ cum_v = bars["volume"].groupby(bars["date"]).cumsum().replace(0, np.nan)
 bars["vwap"] = cum_vp / cum_v
 bars["vwap_distance"] = bars["close"] - bars["vwap"]
 
+# Opening Range (7) - First 12 bars (60 mins) of each trading date
 or_df = bars.groupby("date").head(12).groupby("date").agg({
     "high": "max",
     "low": "min",
@@ -115,6 +123,7 @@ bars["dist_or_low"] = bars["close"] - bars["opening_low"]
 bars["dist_open_price"] = bars["close"] - bars["opening_open"]
 bars["inside_or"] = ((bars["close"] < bars["opening_high"]) & (bars["close"] > bars["opening_low"])).astype(int)
 
+# Trading Sessions (3)
 hour = bars["timestamp"].dt.hour
 bars["tokyo"] = ((hour >= 0) & (hour < 8)).astype(int)
 bars["london"] = ((hour >= 8) & (hour < 16)).astype(int)
@@ -177,6 +186,7 @@ up_mae = mean_absolute_error(y_upside, upside_model.predict(X))
 down_mae = mean_absolute_error(y_downside, downside_model.predict(X))
 width_mae = mean_absolute_error(y_width, width_model.predict(X))
 
+# Save all artifacts to models/ directory
 joblib.dump(FEATURES, f"{MODEL_DIR}/features.joblib")
 joblib.dump(upside_model, f"{MODEL_DIR}/upside30.joblib")
 joblib.dump(downside_model, f"{MODEL_DIR}/downside30.joblib")
@@ -186,7 +196,7 @@ with open(LAST_TRAINED_FILE, "w") as f:
     f.write(TODAY_UTC)
 
 print("\n" + "=" * 64)
-print("US30 QUANTUM SUPREME — TRAINING COMPLETE")
+print("QUANTUM SUPREME — TRAINING COMPLETE")
 print("=" * 64)
 print(f"Total Bars Trained : {len(X):,}")
 print(f"Date Range         : {train_df['timestamp'].iloc[0]} -> {train_df['timestamp'].iloc[-1]}")
@@ -195,6 +205,9 @@ print(f"Downside 30m MAE   : {down_mae:.2f} pts")
 print(f"Width 30m MAE      : {width_mae:.2f} pts")
 print("=" * 64)
 
+# ------------------------------------------------------------
+# 4. SAVE UPDATED MODELS BACK TO GITHUB REPOSITORY
+# ------------------------------------------------------------
 try:
     subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
     subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
@@ -206,8 +219,8 @@ try:
         f"{MODEL_DIR}/width30.joblib",
         LAST_TRAINED_FILE
     ], check=True)
-    subprocess.run(["git", "commit", "-m", f"Daily US30 AI model retrain ({TODAY_UTC})"], check=False)
+    subprocess.run(["git", "commit", "-m", f"Daily AI model retrain ({TODAY_UTC})"], check=False)
     subprocess.run(["git", "push"], check=False)
-    print("Successfully saved updated US30 models to GitHub repository.")
+    print("Successfully saved updated models to GitHub repository.")
 except Exception as e:
     print(f"Git commit/push skipped: {e}")
