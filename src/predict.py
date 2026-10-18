@@ -26,7 +26,7 @@ MODEL_DIR = "models"
 FEE = 0.0 
 
 # ------------------------------------------------------------
-# DATABASE CONNECTION & SCHEMA VERIFICATION
+# DATABASE CONNECTION & SCHEMA + DASHBOARD PERMISSIONS
 # ------------------------------------------------------------
 try:
     conn = psycopg.connect(DATABASE_URL)
@@ -37,7 +37,7 @@ except Exception as e:
 
 cur = conn.cursor()
 
-# Ensure the log table exists in Postgres (for your Live Dashboard)
+# Ensure the log table exists AND allow the Live Dashboard (anon) to read it
 cur.execute("""
 CREATE TABLE IF NOT EXISTS supreme_grid_log (
     id SERIAL PRIMARY KEY,
@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS supreme_grid_log (
     status TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+GRANT USAGE ON SCHEMA public TO anon, authenticated;
+GRANT SELECT ON TABLE public.supreme_grid_log TO anon, authenticated;
+ALTER TABLE public.supreme_grid_log ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow public read access" ON public.supreme_grid_log;
+CREATE POLICY "Allow public read access" ON public.supreme_grid_log FOR SELECT USING (true);
+NOTIFY pgrst, 'reload schema';
 """)
 
 print("Fetching recent US30 market data from m5_bars...")
@@ -144,7 +151,6 @@ print("Loading US30 Supreme ML Models...")
 FEATURES = joblib.load(f"{MODEL_DIR}/features.joblib")
 upside_model = joblib.load(f"{MODEL_DIR}/upside30.joblib")
 
-# Supports either downside30.joblib or width30/range30 naming
 downside_path = f"{MODEL_DIR}/downside30.joblib"
 width_path = f"{MODEL_DIR}/width30.joblib" if os.path.exists(f"{MODEL_DIR}/width30.joblib") else f"{MODEL_DIR}/range30.joblib"
 
@@ -193,30 +199,10 @@ elif pred_downside > pred_upside:
     raw_signal = "SELL"
 
 # ------------------------------------------------------------
-# FETCH LIVE NASDAQ (NQ=F) 15-MINUTE DIRECTION
-# ------------------------------------------------------------
-nas_dir = "FLAT"
-try:
-    nas_url = "https://query1.finance.yahoo.com/v8/finance/chart/NQ=F?interval=5m&range=1d"
-    req = urllib.request.Request(nas_url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        nas_data = json.loads(resp.read().decode("utf-8"))
-    raw_closes = nas_data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
-    closes = [c for c in raw_closes if c is not None]
-    if len(closes) >= 4:
-        if closes[-1] > closes[-4]:
-            nas_dir = "UP"
-        elif closes[-1] < closes[-4]:
-            nas_dir = "DOWN"
-except Exception as e:
-    print(f"Nasdaq fetch skipped: {e}")
-
-# ------------------------------------------------------------
 # THE GRID DEFENSE SYSTEM (CANCELED)
 # ------------------------------------------------------------
 signal = raw_signal
-base_reason = "Autonomous Execution" if raw_signal != "WAIT" else "Equal upside and downside (WAIT)"
-reason = f"{base_reason} | NAS:{nas_dir}"
+reason = "Autonomous Execution" if raw_signal != "WAIT" else "Equal upside and downside (WAIT)"
 
 # ------------------------------------------------------------
 # ASSIGN FINAL VARIABLES FOR DATABASE
@@ -243,7 +229,13 @@ INSERT INTO supreme_grid_log (
     timestamp, price, signal, reason, entry_zone, entry, take_profit, status
 )
 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-ON CONFLICT (timestamp) DO NOTHING;
+ON CONFLICT (timestamp) DO UPDATE SET
+    price = EXCLUDED.price,
+    signal = EXCLUDED.signal,
+    reason = EXCLUDED.reason,
+    entry_zone = EXCLUDED.entry_zone,
+    entry = EXCLUDED.entry,
+    take_profit = EXCLUDED.take_profit;
 """, (
     ts,
     round(price, 0),
@@ -279,7 +271,6 @@ if signal != "WAIT":
     print(f">> EXECUTING LIMIT ORDER AT {chart_entry:.0f} <<")
 print("="*64)
 
-# Grab Telegram credentials from GitHub Secrets
 bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
 chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
