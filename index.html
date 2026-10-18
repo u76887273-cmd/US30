@@ -94,15 +94,9 @@
     </div>
 
     <script>
-        // =========================================================
-        // SETUP 1: SUPABASE (US30 PRE-CONFIGURED)
-        // =========================================================
         const SUPABASE_URL = "https://nabjqvmgytcnlezyxnly.supabase.co"; 
         const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5hYmpxdm1neXRjbmxlenl4bmx5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA5MDg1MzcsImV4cCI6MjEwNjQ4NDUzN30.HRR0_Yu6xIUE7DAdqvPJlUOu37Gkz8xX6g4rsIVN98I";
 
-        // =========================================================
-        // SETUP 2: GITHUB API DETAILS (AUTO-DETECTS OR USES US30 REPO)
-        // =========================================================
         const GITHUB_USERNAME = window.location.hostname.includes("github.io") 
             ? window.location.hostname.split(".")[0] 
             : "u76887273-cmd"; 
@@ -122,7 +116,10 @@
                     }
                 });
 
-                if (!response.ok) throw new Error("Failed to connect");
+                if (!response.ok) {
+                    const errText = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${errText}`);
+                }
                 
                 const data = await response.json();
                 
@@ -130,7 +127,7 @@
                     const row = data[0];
                     const date = new Date(row.timestamp);
                     document.getElementById('time-val').innerText = date.toLocaleString();
-                    document.getElementById('price-val').innerText = row.price.toFixed(0); 
+                    document.getElementById('price-val').innerText = Number(row.price).toFixed(0); 
                     
                     const rawReason = row.reason || "Autonomous Execution";
                     const cleanReason = rawReason.split("|")[0].trim();
@@ -155,9 +152,8 @@
                         document.getElementById('sell-zone').innerText = zoneText;
                     }
 
-                    // Horizontal TP bounds logic
                     if (row.take_profit) {
-                        const eq = row.take_profit;
+                        const eq = Number(row.take_profit);
                         document.getElementById('tp-val').innerText = eq.toFixed(0);
                         document.getElementById('tp-upper').innerText = (eq + 40).toFixed(0);
                         document.getElementById('tp-lower').innerText = (eq - 40).toFixed(0);
@@ -175,7 +171,7 @@
                 }
             } catch (error) {
                 console.error(error);
-                statusEl.innerText = "Error connecting to Supabase.";
+                statusEl.innerText = "Supabase Error: " + error.message;
                 statusEl.className = "mt-2 text-xs font-mono text-rose-500";
             }
         }
