@@ -101,10 +101,12 @@
         const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5hYmpxdm1neXRjbmxlenl4bmx5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA5MDg1MzcsImV4cCI6MjEwNjQ4NDUzN30.HRR0_Yu6xIUE7DAdqvPJlUOu37Gkz8xX6g4rsIVN98I";
 
         // =========================================================
-        // SETUP 2: GITHUB API DETAILS (US30)
+        // SETUP 2: GITHUB API DETAILS (AUTO-DETECTS OR USES US30 REPO)
         // =========================================================
-        const GITHUB_USERNAME = "ngyakoub1-gif"; 
-        const GITHUB_REPO = "US30_30Min_Prediction"; 
+        const GITHUB_USERNAME = window.location.hostname.includes("github.io") 
+            ? window.location.hostname.split(".")[0] 
+            : "u76887273-cmd"; 
+        const GITHUB_REPO = window.location.pathname.split("/")[1] || "US30-Quantum-"; 
         const WORKFLOW_FILENAME = "pipeline.yml"; 
 
         async function fetchData() {
