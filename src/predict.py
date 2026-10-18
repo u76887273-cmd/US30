@@ -63,7 +63,10 @@ if not data:
     sys.exit(0)
 
 bars = pd.DataFrame(data, columns=columns)
-bars["timestamp"] = pd.to_datetime(bars["timestamp"], utc=True)
+bars["timestamp"] = pd.to_datetime(bars["timestamp"], format="mixed", utc=True)
+for col in ["open", "high", "low", "close", "volume"]:
+    bars[col] = pd.to_numeric(bars[col], errors="coerce")
+bars = bars.dropna(subset=["timestamp", "open", "high", "low", "close"]).copy()
 bars = bars.sort_values("timestamp").reset_index(drop=True)
 
 # ------------------------------------------------------------
