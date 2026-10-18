@@ -177,12 +177,13 @@
         }
 
         async function forceRun() {
-            let token = localStorage.getItem("github_pat_us30");
+            // Reuses the exact same token saved in Safari from your JP225 dashboard!
+            let token = localStorage.getItem("github_pat") || localStorage.getItem("github_pat_us30");
             
             if (!token) {
                 token = prompt("🔒 FIRST TIME SETUP:\n\nPlease paste your GitHub Token (ghp_... or github_pat_...) here:");
                 if (!token) return; 
-                localStorage.setItem("github_pat_us30", token); 
+                localStorage.setItem("github_pat", token.trim()); 
             }
 
             const statusEl = document.getElementById('connection-status');
@@ -206,9 +207,10 @@
                     statusEl.className = "mt-2 text-xs font-mono text-emerald-400";
                 } else {
                     const errData = await response.json();
-                    if (response.status === 401 || response.status === 404) {
-                        localStorage.removeItem("github_pat_us30"); 
-                        alert("❌ Token invalid or workflow file name mismatch. I have cleared the token from memory.\n\nPlease check WORKFLOW_FILENAME or try again with a valid token.");
+                    if (response.status === 401 || response.status === 404 || response.status === 403) {
+                        localStorage.removeItem("github_pat");
+                        localStorage.removeItem("github_pat_us30");
+                        alert("❌ Token needs permission for US30-Quantum- (or is expired). I cleared it from memory so you can paste a new one.");
                     } else {
                         alert("Error: " + errData.message);
                     }
