@@ -10,7 +10,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error
 
 # ============================================================
-# QUANTUM SUPREME — AUTOMATED AI MODEL TRAINER (ONCE PER DAY)
+# US30 QUANTUM SUPREME — AUTOMATED AI MODEL TRAINER (ONCE PER DAY)
 # ============================================================
 
 MODEL_DIR = "models"
@@ -25,26 +25,25 @@ if os.path.exists(LAST_TRAINED_FILE):
     with open(LAST_TRAINED_FILE, "r") as f:
         last_trained = f.read().strip()
     if last_trained == TODAY_UTC:
-        print(f"AI models already trained today ({TODAY_UTC}). Skipping training.")
+        print(f"US30 AI models already trained today ({TODAY_UTC}). Skipping training.")
         sys.exit(0)
 
-print(f"Starting daily AI model training for {TODAY_UTC}...")
+print(f"Starting daily US30 AI model training for {TODAY_UTC}...")
 
-# Retrieve database connection string from environment variables
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     print("ERROR: DATABASE_URL environment variable is missing.")
     sys.exit(1)
 
 # ------------------------------------------------------------
-# 1. FETCH ALL HISTORICAL DATA FROM SUPABASE
+# 1. FETCH ALL HISTORICAL DATA FROM SUPABASE (m5_bars)
 # ------------------------------------------------------------
-print("Connecting to Supabase database...")
+print("Connecting to US30 Supabase database...")
 try:
     conn = psycopg.connect(DATABASE_URL)
     cur = conn.cursor()
     print("Fetching all historical M5 bars from m5_bars...")
-    cur.execute("SELECT * FROM m5_bars ORDER BY timestamp ASC;")
+    cur.execute("SELECT timestamp, open, high, low, close, volume FROM m5_bars ORDER BY timestamp ASC;")
     columns = [desc[0] for desc in cur.description]
     data = cur.fetchall()
     cur.close()
@@ -58,9 +57,17 @@ if not data or len(data) < 200:
     sys.exit(0)
 
 bars = pd.DataFrame(data, columns=columns)
+
+# Safe mixed-format UTC timestamp parsing (fixes the +00 ValueError)
 bars["timestamp"] = pd.to_datetime(bars["timestamp"], format="mixed", utc=True)
+
+# Ensure numeric columns are clean floats
+for col in ["open", "high", "low", "close", "volume"]:
+    bars[col] = pd.to_numeric(bars[col], errors="coerce")
+
+bars = bars.dropna(subset=["timestamp", "open", "high", "low", "close"]).copy()
 bars = bars.sort_values("timestamp").drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
-print(f"Loaded {len(bars):,} historical 5-minute candles.")
+print(f"Loaded {len(bars):,} clean historical 5-minute candles.")
 
 # ------------------------------------------------------------
 # 2. ENGINEER ALL 31 INPUT FEATURES
@@ -91,7 +98,7 @@ bars["tr3"] = (bars["low"] - bars["prev_close"]).abs()
 bars["tr"] = bars[["tr1", "tr2", "tr3"]].max(axis=1)
 bars["atr14"] = bars["tr"].rolling(14).mean()
 bars["atr50"] = bars["tr"].rolling(50).mean()
-bars["relative_atr"] = bars["atr14"] / bars["atr50"]
+bars["relative_atr"] = bars["atr14"] / bars["atr50"].replace(0, np.nan)
 
 # Momentum / RSI 14 (1)
 delta = bars["close"].diff()
@@ -186,17 +193,18 @@ up_mae = mean_absolute_error(y_upside, upside_model.predict(X))
 down_mae = mean_absolute_error(y_downside, downside_model.predict(X))
 width_mae = mean_absolute_error(y_width, width_model.predict(X))
 
-# Save all artifacts to models/ directory
+# Save both width30.joblib and range30.joblib for 100% compatibility
 joblib.dump(FEATURES, f"{MODEL_DIR}/features.joblib")
 joblib.dump(upside_model, f"{MODEL_DIR}/upside30.joblib")
 joblib.dump(downside_model, f"{MODEL_DIR}/downside30.joblib")
 joblib.dump(width_model, f"{MODEL_DIR}/width30.joblib")
+joblib.dump(width_model, f"{MODEL_DIR}/range30.joblib")
 
 with open(LAST_TRAINED_FILE, "w") as f:
     f.write(TODAY_UTC)
 
 print("\n" + "=" * 64)
-print("QUANTUM SUPREME — TRAINING COMPLETE")
+print("US30 QUANTUM SUPREME — TRAINING COMPLETE")
 print("=" * 64)
 print(f"Total Bars Trained : {len(X):,}")
 print(f"Date Range         : {train_df['timestamp'].iloc[0]} -> {train_df['timestamp'].iloc[-1]}")
@@ -212,15 +220,17 @@ try:
     subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
     subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=True)
     subprocess.run([
-        "git", "add",
+        "git", "add", "-f",
         f"{MODEL_DIR}/features.joblib",
         f"{MODEL_DIR}/upside30.joblib",
         f"{MODEL_DIR}/downside30.joblib",
         f"{MODEL_DIR}/width30.joblib",
+        f"{MODEL_DIR}/range30.joblib",
         LAST_TRAINED_FILE
     ], check=True)
-    subprocess.run(["git", "commit", "-m", f"Daily AI model retrain ({TODAY_UTC})"], check=False)
+    subprocess.run(["git", "commit", "-m", f"Daily US30 AI model retrain ({TODAY_UTC})"], check=False)
+    subprocess.run(["git", "pull", "--rebase"], check=False)
     subprocess.run(["git", "push"], check=False)
-    print("Successfully saved updated models to GitHub repository.")
+    print("Successfully saved updated US30 models to GitHub repository.")
 except Exception as e:
     print(f"Git commit/push skipped: {e}")
