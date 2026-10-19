@@ -4,203 +4,141 @@ import psycopg
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 from twisted.internet import reactor
-
-from ctrader_open_api import Client, TcpProtocol, EndPoints, Protobuf
+from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
 from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import *
 from ctrader_open_api.messages.OpenApiMessages_pb2 import *
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import *
 
 # ============================================================
-# 1. LOAD CREDENTIALS FROM GITHUB SECRETS (+ US30 DEFAULTS)
+# US30 QUANTUM SUPREME — SHARED DB M5 DATA FETCHER (SAFE MODE)
 # ============================================================
-DATABASE_URL = os.environ.get("DATABASE_URL")
-CTRADER_CLIENT_ID = os.environ.get("CTRADER_CLIENT_ID")
-CTRADER_CLIENT_SECRET = os.environ.get("CTRADER_CLIENT_SECRET")
-CTRADER_ACCESS_TOKEN = os.environ.get("CTRADER_ACCESS_TOKEN")
 
-# Built-in defaults from your US30 config.py (25145646 & 1287)
-ACCOUNT_ID = int(os.environ.get("ACCOUNT_ID") or 25145646)
-SYMBOL_ID = int(os.environ.get("SYMBOL_ID") or 1287)
+raw_db_url = os.environ.get("DATABASE_URL", "")
+DATABASE_URL = raw_db_url.strip().strip('"').strip("'")
 
-if not all([DATABASE_URL, CTRADER_CLIENT_ID, CTRADER_CLIENT_SECRET, CTRADER_ACCESS_TOKEN, ACCOUNT_ID, SYMBOL_ID]):
-    print("ERROR: Missing one or more required environment variables/secrets.")
+CTRADER_CLIENT_ID = os.environ.get("CTRADER_CLIENT_ID", "").strip()
+CTRADER_CLIENT_SECRET = os.environ.get("CTRADER_CLIENT_SECRET", "").strip()
+CTRADER_ACCESS_TOKEN = os.environ.get("CTRADER_ACCESS_TOKEN", "").strip()
+ACCOUNT_ID = int(os.environ.get("ACCOUNT_ID", "25145646"))
+SYMBOL_ID = int(os.environ.get("SYMBOL_ID", "1287"))
+
+if not DATABASE_URL.startswith("postgres"):
+    print("CRITICAL ERROR WITH DATABASE_URL!")
     sys.exit(1)
 
-# ============================================================
-# 2. DATABASE HELPER FUNCTIONS (Psycopg 3 — US30 m5_bars)
-# ============================================================
-def get_latest_timestamp():
-    """Fetches the most recent bar timestamp from Supabase m5_bars."""
+conn = psycopg.connect(DATABASE_URL, autocommit=True)
+cur = conn.cursor()
+
+# Check if the 30-minute repo already updated m5_bars recently
+cur.execute("SELECT COUNT(*), MAX(timestamp) FROM m5_bars;")
+row_count, latest_ts = cur.fetchone()
+print(f"Shared Supabase DB currently has {row_count} M5 bars (Latest: {latest_ts}).")
+
+# Safely parse latest_ts whether the DB column is TEXT or TIMESTAMPTZ
+if latest_ts is not None:
     try:
-        with psycopg.connect(DATABASE_URL) as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS m5_bars (
-                        timestamp TIMESTAMPTZ PRIMARY KEY,
-                        open REAL,
-                        high REAL,
-                        low REAL,
-                        close REAL,
-                        volume BIGINT
-                    );
-                """)
-                cur.execute("SELECT MAX(timestamp) FROM m5_bars;")
-                result = cur.fetchone()[0]
-                if result:
-                    return result.replace(tzinfo=timezone.utc)
+        latest_dt = pd.to_datetime(latest_ts, utc=True).to_pydatetime()
+        now_utc = datetime.now(timezone.utc)
+        if (now_utc - latest_dt).total_seconds() < 600 and row_count > 300:
+            print("m5_bars is already up-to-date from the 30-minute US30 engine! Proceeding directly to 4H AI.")
+            cur.close()
+            conn.close()
+            sys.exit(0)
     except Exception as e:
-        print(f"Database read error: {e}")
-    return None
+        print(f"Timestamp check note: {e}")
 
-def save_new_bars(df):
-    """Saves the downloaded pandas DataFrame into Supabase m5_bars."""
-    try:
-        with psycopg.connect(DATABASE_URL) as conn:
-            with conn.cursor() as cur:
-                for _, row in df.iterrows():
-                    cur.execute("""
-                        INSERT INTO m5_bars (timestamp, open, high, low, close, volume)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (timestamp) DO NOTHING;
-                    """, (
-                        row['timestamp'], row['open'], row['high'], 
-                        row['low'], row['close'], row['volume']
-                    ))
-            conn.commit()
-    except Exception as e:
-        print(f"Database write error: {e}")
-
-# ============================================================
-# 3. SETUP TARGET TIME & MISSING DATA RANGE
-# ============================================================
-now_utc = datetime.now(timezone.utc)
-target_minute = (now_utc.minute // 5) * 5
-target_ts = now_utc.replace(minute=target_minute, second=0, microsecond=0)
-
-last_ts = get_latest_timestamp()
-
-if not last_ts:
-    print("Database is empty or table missing. Defaulting to 7 days of history.")
-    last_ts = target_ts - timedelta(days=7)
-
-FIVE_MIN_MS = 5 * 60 * 1000
-CHUNK_DAYS = 7
-CHUNK_MS = CHUNK_DAYS * 24 * 60 * 60 * 1000
-
-FROM = int(last_ts.timestamp() * 1000) + FIVE_MIN_MS
-TO = int(target_ts.timestamp() * 1000)
-
-if FROM >= TO:
-    print("✓ SUPABASE DATABASE IS ALREADY UP TO DATE.")
+if not all([CTRADER_CLIENT_ID, CTRADER_CLIENT_SECRET, CTRADER_ACCESS_TOKEN]):
+    print("Using existing m5_bars from shared Supabase DB.")
+    cur.close()
+    conn.close()
     sys.exit(0)
-
-print(f"Download start : {datetime.fromtimestamp(FROM / 1000, tz=timezone.utc)}")
-print(f"Download target: {datetime.fromtimestamp(TO / 1000, tz=timezone.utc)}")
-
-# ============================================================
-# 4. CTRADER AUTOMATION SETUP
-# ============================================================
-current_from = FROM
-total_inserted = 0
-download_error = None
 
 client = Client(EndPoints.PROTOBUF_LIVE_HOST, EndPoints.PROTOBUF_PORT, TcpProtocol)
 
-def stop_client():
+def stop_reactor():
     try:
-        client.stopService()
+        cur.close()
+        conn.close()
     except Exception:
         pass
     if reactor.running:
         reactor.stop()
 
-def send_next_request():
-    global current_from
-    if current_from >= TO:
-        stop_client()
-        return
+def on_error(failure):
+    print(f"cTrader API Error: {failure}")
+    stop_reactor()
 
-    chunk_to = min(current_from + CHUNK_MS, TO)
+def on_trendbars_res(result):
+    try:
+        res = Protobuf.extract(result)
+        bars = res.trendbar
+        print(f"Received {len(bars)} M5 bars from cTrader.")
+
+        # Fetch last 2000 timestamps as strings & datetimes so we never insert duplicates or need ON CONFLICT
+        cur.execute("SELECT timestamp FROM m5_bars ORDER BY timestamp DESC LIMIT 2000;")
+        existing_raw = [r[0] for r in cur.fetchall() if r[0] is not None]
+        existing_dt = set()
+        for val in existing_raw:
+            try:
+                existing_dt.add(pd.to_datetime(val, utc=True).floor("min"))
+            except Exception:
+                pass
+
+        inserted = 0
+        for b in bars:
+            ts = datetime.fromtimestamp(b.utcTimestampInMinutes * 60, tz=timezone.utc)
+            if pd.to_datetime(ts, utc=True).floor("min") in existing_dt:
+                continue
+            low = b.low / 100000.0
+            open_p = (b.low + b.deltaOpen) / 100000.0
+            high_p = (b.low + b.deltaHigh) / 100000.0
+            close_p = (b.low + b.deltaClose) / 100000.0
+            vol = b.volume
+
+            ts_str = ts.strftime("%Y-%m-%d %H:%M:%S+00")
+            cur.execute("""
+                INSERT INTO m5_bars (timestamp, open, high, low, close, volume)
+                VALUES (%s, %s, %s, %s, %s, %s);
+            """, (ts_str, open_p, high_p, low, close_p, vol))
+            inserted += 1
+
+        print(f"Inserted {inserted} new US30 M5 bars into shared Supabase DB.")
+    except Exception as e:
+        print(f"Database insert note: {e}")
+    finally:
+        stop_reactor()
+
+def on_account_auth_res(result):
+    now = datetime.now(timezone.utc)
+    from_ts = int((now - timedelta(days=5)).timestamp() * 1000)
+    to_ts = int(now.timestamp() * 1000)
+
     req = ProtoOAGetTrendbarsReq()
     req.ctidTraderAccountId = ACCOUNT_ID
-    req.symbolId = SYMBOL_ID
     req.period = ProtoOATrendbarPeriod.M5
-    req.fromTimestamp = current_from
-    req.toTimestamp = chunk_to
-    client.send(req)
+    req.symbolId = SYMBOL_ID
+    req.fromTimestamp = from_ts
+    req.toTimestamp = to_ts
+    d = client.send(req)
+    d.addCallbacks(on_trendbars_res, on_error)
+
+def on_app_auth_res(result):
+    req = ProtoOAAccountAuthReq()
+    req.ctidTraderAccountId = ACCOUNT_ID
+    req.accessToken = CTRADER_ACCESS_TOKEN
+    d = client.send(req)
+    d.addCallbacks(on_account_auth_res, on_error)
 
 def connected(client):
     req = ProtoOAApplicationAuthReq()
     req.clientId = CTRADER_CLIENT_ID
     req.clientSecret = CTRADER_CLIENT_SECRET
-    client.send(req)
+    d = client.send(req)
+    d.addCallbacks(on_app_auth_res, on_error)
 
-def received(client, message):
-    global current_from, total_inserted, download_error
+# 20-second safety timeout so GitHub Actions NEVER hangs
+reactor.callLater(20, stop_reactor)
 
-    if message.payloadType == ProtoOAApplicationAuthRes().payloadType:
-        req = ProtoOAAccountAuthReq()
-        req.ctidTraderAccountId = ACCOUNT_ID
-        req.accessToken = CTRADER_ACCESS_TOKEN
-        client.send(req)
-        return
-
-    if message.payloadType == ProtoOAAccountAuthRes().payloadType:
-        send_next_request()
-        return
-
-    if message.payloadType == ProtoOAErrorRes().payloadType:
-        res = Protobuf.extract(message)
-        download_error = f"{getattr(res, 'errorCode', 'UNKNOWN')}: {getattr(res, 'description', '')}"
-        print(f"!!! API ERROR: {download_error}")
-        stop_client()
-        return
-
-    if message.payloadType == ProtoOAGetTrendbarsRes().payloadType:
-        res = Protobuf.extract(message)
-        trendbars = res.trendbar
-        
-        if getattr(res, "hasMore", False):
-            print("!!! RESPONSE LIMIT DETECTED !!!")
-            stop_client()
-            return
-
-        chunk_rows = []
-        for b in trendbars:
-            low_price = b.low / 100000.0
-            open_price = (b.low + b.deltaOpen) / 100000.0
-            high_price = (b.low + b.deltaHigh) / 100000.0
-            close_price = (b.low + b.deltaClose) / 100000.0
-            timestamp = datetime.fromtimestamp(b.utcTimestampInMinutes * 60, tz=timezone.utc)
-            
-            chunk_rows.append([timestamp, open_price, high_price, low_price, close_price, int(b.volume)])
-
-        if chunk_rows:
-            df = pd.DataFrame(chunk_rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
-            df = df.drop_duplicates(subset="timestamp").sort_values("timestamp")
-            
-            save_new_bars(df)
-            total_inserted += len(df)
-
-        chunk_to = min(current_from + CHUNK_MS, TO)
-        current_from = chunk_to + FIVE_MIN_MS
-        
-        if current_from > TO:
-            current_from = TO
-            
-        send_next_request()
-
-# ============================================================
-# 5. RUN REACTOR
-# ============================================================
 client.setConnectedCallback(connected)
-client.setMessageReceivedCallback(received)
-
-print("Connecting to cTrader...")
-try:
-    client.startService()
-    reactor.run()
-except Exception as e:
-    print(f"Connection error: {e}")
-
-print(f"✓ AUTOMATED UPDATE COMPLETE. Total new bars: {total_inserted}")
+client.startService()
+reactor.run()
