@@ -11,7 +11,7 @@ CLIENT_ID = os.environ.get("CTRADER_CLIENT_ID")
 CLIENT_SECRET = os.environ.get("CTRADER_CLIENT_SECRET")
 ACCESS_TOKEN = os.environ.get("CTRADER_ACCESS_TOKEN")
 ACCOUNT_ID = int(os.environ.get("ACCOUNT_ID") or os.environ.get("CTRADER_ACCOUNT_ID") or 0)
-SYMBOL_ID = int(os.environ.get("SYMBOL_ID") or 1287)  # US30 FIX Symbol ID (change if needed)
+SYMBOL_ID = int(os.environ.get("SYMBOL_ID") or 1287)  # US30 Symbol ID = 1287
 
 client = Client(EndPoints.PROTOBUF_LIVE_HOST, EndPoints.PROTOBUF_PORT, TcpProtocol)
 
@@ -25,12 +25,13 @@ def on_trendbars(result):
     rows = []
 
     for b in res.trendbar:
-        # Indices in cTrader are typically scaled by 10 or 100 depending on broker; 
-        # matching your original US30 scaling:
-        low = b.low / 100.0
-        open_p = (b.low + b.deltaOpen) / 100.0
-        close_p = (b.low + b.deltaClose) / 100.0
-        high_p = (b.low + b.deltaHigh) / 100.0
+        # Auto-detect cTrader scaling (100000.0 for Open API v2 standard, or 100.0 for legacy/digits)
+        scale = 100000.0 if b.low > 100000000 else 100.0
+
+        low = b.low / scale
+        open_p = (b.low + b.deltaOpen) / scale
+        close_p = (b.low + b.deltaClose) / scale
+        high_p = (b.low + b.deltaHigh) / scale
         ts = datetime.datetime.fromtimestamp(b.utcTimestampInMinutes * 60, tz=datetime.timezone.utc)
         rows.append({
             "timestamp": ts,
@@ -42,10 +43,11 @@ def on_trendbars(result):
         })
 
     df = pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
+    # Save to both data_30m.csv and data_4h.csv so validator.py works without changes
     df.to_csv("data_m5.csv", index=False)
     df.to_csv("data_30m.csv", index=False)
     df.to_csv("data_4h.csv", index=False)
-    print(f"[M5 US30] Saved {len(df)} bars (Latest close: {df['close'].iloc[-1]:.1f})")
+    print(f"[M5] Saved {len(df)} 5-min bars (Latest close: {df['close'].iloc[-1]:.2f})")
 
     if reactor.running:
         reactor.stop()
@@ -53,6 +55,7 @@ def on_trendbars(result):
 def on_account_auth(result):
     print("cTrader account authenticated. Pulling US30 M5 bars...")
     now = datetime.datetime.now(datetime.timezone.utc)
+    # Fetch 14 days of M5 bars (~2,800 bars)
     from_ts = int((now - datetime.timedelta(days=14)).timestamp() * 1000)
     to_ts = int(now.timestamp() * 1000)
 
