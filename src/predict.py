@@ -9,23 +9,24 @@ from train import build_features, FEATURES
 DB_URL = os.environ.get("DATABASE_URL")
 
 TABLES = {
-    "30m": "supreme_grid_log",         # Your existing US30 30m table
-    "4h":  "supreme_grid_log_4h"       # Your existing US30 4h table
+    "30m": "supreme_grid_log",
+    "4h":  "supreme_grid_log_4h"
 }
 
 def get_nasdaq_direction():
     """Fetches live Nasdaq 100 (NQ=F) 15m trend for US30 macro check."""
-    try:
-        data = yf.download("NQ=F", period="2d", interval="15m", progress=False)
-        if not data.empty and len(data) >= 2:
-            close_col = data["Close"]
-            last_close = float(close_col.iloc[-1].iloc[0]) if hasattr(close_col.iloc[-1], "iloc") else float(close_col.iloc[-1])
-            prev_close = float(close_col.iloc[-2].iloc[0]) if hasattr(close_col.iloc[-2], "iloc") else float(close_col.iloc[-2])
-            change_pct = ((last_close - prev_close) / prev_close) * 100
-            direction = "UP" if last_close >= prev_close else "DOWN"
-            return f"NAS:{direction} ({last_close:.1f} | {change_pct:+.2f}%)"
-    except Exception as e:
-        print(f"Nasdaq check failed: {e}")
+    for ticker in ["NQ=F", "QQQ"]:
+        try:
+            data = yf.download(ticker, period="2d", interval="15m", progress=False)
+            if not data.empty and len(data) >= 2:
+                close_col = data["Close"]
+                last_close = float(close_col.iloc[-1].iloc[0]) if hasattr(close_col.iloc[-1], "iloc") else float(close_col.iloc[-1])
+                prev_close = float(close_col.iloc[-2].iloc[0]) if hasattr(close_col.iloc[-2], "iloc") else float(close_col.iloc[-2])
+                change_pct = ((last_close - prev_close) / prev_close) * 100
+                direction = "UP" if last_close >= prev_close else "DOWN"
+                return f"NAS:{direction} ({last_close:.1f} | {change_pct:+.2f}%)"
+        except Exception as e:
+            print(f"Ticker {ticker} check failed: {e}")
     return "NAS:FLAT"
 
 def init_db_table(conn, table_name):
@@ -55,6 +56,7 @@ def predict_for_timeframe(conn, raw_df, tf, nas_tag):
         print(f"[{tf.upper()}] Model file {model_path} missing.")
         return
 
+    # Build timeframe-specific features so 30m and 4h each have their own true RSI & EMAs
     df_feat = build_features(raw_df, tf).dropna().reset_index(drop=True)
     models = joblib.load(model_path)
     latest_row = df_feat.iloc[[-1]]
@@ -63,6 +65,7 @@ def predict_for_timeframe(conn, raw_df, tf, nas_tag):
     price = float(latest_row["close"].iloc[0])
     rsi = float(latest_row["rsi"].iloc[0])
 
+    # Predict Upside and Downside range in price units
     pred_up = float(models["up"].predict(X_latest)[0])
     pred_down = float(models["down"].predict(X_latest)[0])
 
@@ -70,10 +73,10 @@ def predict_for_timeframe(conn, raw_df, tf, nas_tag):
     proj_low = price - pred_down
     total_range = max(proj_high - proj_low, 10.0)
 
-    # Midline Equilibrium
+    # Equilibrium (Midline of AI Projected Range)
     midline_eq = (proj_high + proj_low) / 2.0
 
-    # Pure Midline Rule (0.6 condition removed)
+    # Pure Midline Rule
     if price < midline_eq:
         signal = "BUY"
     elif price > midline_eq:
@@ -81,28 +84,28 @@ def predict_for_timeframe(conn, raw_df, tf, nas_tag):
     else:
         signal = "WAIT"
 
-    # Dynamic 20% Entry Limit Zones
+    # Dynamic 20% Entry Limit Zones sliced from Projected High/Low Range
     zone_height = max(total_range * 0.20, 5.0)
     buy_low = round(proj_low, 0)
     buy_high = round(proj_low + zone_height, 0)
     sell_low = round(proj_high - zone_height, 0)
     sell_high = round(proj_high, 0)
 
-    price_int = round(price, 0)
-    eq_int = round(midline_eq, 0)
+    price_0d = round(price, 0)
+    eq_0d = round(midline_eq, 0)
 
     if signal == "BUY":
-        entry_zone = f"B: {buy_int(buy_low)} - {int(buy_high)} | S: WAITING"
+        entry_zone = f"B: {buy_low:.0f} - {buy_high:.0f} | S: WAITING"
     elif signal == "SELL":
-        entry_zone = f"B: WAITING | S: {int(sell_low)} - {int(sell_high)}"
+        entry_zone = f"B: WAITING | S: {sell_low:.0f} - {sell_high:.0f}"
     else:
-        entry_zone = f"B: {int(buy_low)} - {int(buy_high)} | S: {int(sell_low)} - {int(sell_high)}"
+        entry_zone = f"B: {buy_low:.0f} - {buy_high:.0f} | S: {sell_low:.0f} - {sell_high:.0f}"
 
     up_ratio = (pred_up / total_range) * 100.0
     down_ratio = (pred_down / total_range) * 100.0
     bias_pct = up_ratio if signal == "BUY" else down_ratio
 
-    reason = f"Bias:{bias_pct:.1f}% | RSI:{rsi:.1f} | EQ:{int(eq_int)} | {nas_tag}"
+    reason = f"Bias:{bias_pct:.1f}% | RSI:{rsi:.1f} | EQ:{eq_0d:.0f} | {nas_tag}"
     run_ts = datetime.datetime.now(datetime.timezone.utc)
 
     init_db_table(conn, table_name)
@@ -111,18 +114,14 @@ def predict_for_timeframe(conn, raw_df, tf, nas_tag):
         cur.execute(f"""
             INSERT INTO {table_name} (timestamp, price, signal, reason, entry_zone, entry, take_profit, status)
             VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE')
-        """, (run_ts, price_int, signal, reason, entry_zone, price_int, eq_int))
+        """, (run_ts, price_0d, signal, reason, entry_zone, price_0d, eq_0d))
     conn.commit()
-    print(f"[{tf.upper()}] US30 {signal} @ {price_int} | EQ/TP: {eq_int} | Zone: {entry_zone}")
+    print(f"[{tf.upper()}] {signal} @ {price_0d:.0f} | RSI: {rsi:.1f} | EQ/TP: {eq_0d:.0f}")
 
 if __name__ == "__main__":
     if not os.path.exists("data_m5.csv"):
         print("data_m5.csv missing.")
     else:
-		# Helper lambda for integer formatting inside string
-        global buy_int
-        buy_int = lambda x: int(x)
-
         nas_status = get_nasdaq_direction()
         print(f"Live Nasdaq Status: {nas_status}")
         raw_df = pd.read_csv("data_m5.csv")
