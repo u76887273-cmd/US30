@@ -1,52 +1,55 @@
 import os
-import sys
 import psycopg
-from psycopg.rows import dict_row
+import pandas as pd
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
-if not DATABASE_URL:
-    sys.exit(1)
+DB_URL = os.environ.get("DATABASE_URL")
 
-conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, autocommit=True)
-cur = conn.cursor()
+TABLES = {
+    "30m": ("supreme_grid_log",    "data_30m.csv"),
+    "4h":  ("supreme_grid_log_4h", "data_4h.csv")
+}
 
-cur.execute("SELECT high, low, close FROM m5_bars ORDER BY timestamp DESC LIMIT 1;")
-candle = cur.fetchone()
-if not candle:
-    sys.exit(0)
+def validate_table(conn, tf, table_name, csv_path):
+    if not os.path.exists(csv_path):
+        return
 
-high = float(candle["high"])
-low = float(candle["low"])
+    df = pd.read_csv(csv_path)
+    if df.empty:
+        return
 
-cur.execute("SELECT * FROM supreme_grid_log WHERE status IN ('PENDING', 'OPEN') ORDER BY timestamp ASC;")
-trades = cur.fetchall()
+    last_bar = df.iloc[-1]
+    current_high = float(last_bar["high"])
+    current_low = float(last_bar["low"])
 
-updated = 0
-for t in trades:
-    if t["entry"] is None or t["take_profit"] is None:
-        continue
-    tid = t["id"]
-    sig = t["signal"]
-    status = t["status"]
-    entry = float(t["entry"])
-    tp = float(t["take_profit"])
-    new_status = status
+    with conn.cursor() as cur:
+        cur.execute(f"""
+            SELECT id, signal, take_profit
+            FROM {table_name}
+            WHERE status = 'ACTIVE'
+        """)
+        active_rows = cur.fetchall()
 
-    if sig == "BUY":
-        if status == "PENDING" and low <= entry:
-            new_status = "OPEN"
-        if new_status == "OPEN" and high >= tp:
-            new_status = "WIN_TP"
-    elif sig == "SELL":
-        if status == "PENDING" and high >= entry:
-            new_status = "OPEN"
-        if new_status == "OPEN" and low <= tp:
-            new_status = "WIN_TP"
+        hit_ids = []
+        for row_id, signal, tp in active_rows:
+            if tp is None:
+                continue
+            tp_val = float(tp)
+            if signal == "BUY" and current_high >= tp_val:
+                hit_ids.append(row_id)
+            elif signal == "SELL" and current_low <= tp_val:
+                hit_ids.append(row_id)
 
-    if new_status != status:
-        cur.execute("UPDATE supreme_grid_log SET status = %s WHERE id = %s", (new_status, tid))
-        updated += 1
+        if hit_ids:
+            cur.execute(
+                f"UPDATE {table_name} SET status = 'HIT_TP' WHERE id = ANY(%s)",
+                (hit_ids,)
+            )
+            conn.commit()
+            print(f"[{tf.upper()}] Marked {len(hit_ids)} trades as HIT_TP.")
+        else:
+            print(f"[{tf.upper()}] Checked {len(active_rows)} active signals; none hit TP yet.")
 
-cur.close()
-conn.close()
-print(f"US30 Validator complete. Updated: {updated}")
+if __name__ == "__main__":
+    with psycopg.connect(DB_URL) as conn:
+        for tf, (table_name, csv_path) in TABLES.items():
+            validate_table(conn, tf, table_name, csv_path)
