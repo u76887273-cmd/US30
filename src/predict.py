@@ -13,9 +13,9 @@ TABLES = {
     "4h":  "supreme_grid_log_4h"
 }
 
-def get_nasdaq_direction():
-    """Fetches live Nasdaq 100 (NQ=F) 15m trend for US30 macro check."""
-    for ticker in ["NQ=F", "QQQ"]:
+def get_dxy_direction():
+    """Fetches live US Dollar Index (DX-Y.NYB) 15m trend."""
+    for ticker in ["DX-Y.NYB", "UUP"]:
         try:
             data = yf.download(ticker, period="2d", interval="15m", progress=False)
             if not data.empty and len(data) >= 2:
@@ -24,10 +24,10 @@ def get_nasdaq_direction():
                 prev_close = float(close_col.iloc[-2].iloc[0]) if hasattr(close_col.iloc[-2], "iloc") else float(close_col.iloc[-2])
                 change_pct = ((last_close - prev_close) / prev_close) * 100
                 direction = "UP" if last_close >= prev_close else "DOWN"
-                return f"NAS:{direction} ({last_close:.1f} | {change_pct:+.2f}%)"
+                return f"DXY:{direction} ({last_close:.2f} | {change_pct:+.2f}%)"
         except Exception as e:
             print(f"Ticker {ticker} check failed: {e}")
-    return "NAS:FLAT"
+    return "DXY:FLAT"
 
 def init_db_table(conn, table_name):
     with conn.cursor() as cur:
@@ -48,7 +48,7 @@ def init_db_table(conn, table_name):
         """)
     conn.commit()
 
-def predict_for_timeframe(conn, raw_df, tf, nas_tag):
+def predict_for_timeframe(conn, raw_df, tf, dxy_tag):
     model_path = f"model_{tf}.pkl"
     table_name = TABLES[tf]
 
@@ -105,7 +105,7 @@ def predict_for_timeframe(conn, raw_df, tf, nas_tag):
     down_ratio = (pred_down / total_range) * 100.0
     bias_pct = up_ratio if signal == "BUY" else down_ratio
 
-    reason = f"Bias:{bias_pct:.1f}% | RSI:{rsi:.1f} | EQ:{eq_0d:.0f} | {nas_tag}"
+    reason = f"Bias:{bias_pct:.1f}% | RSI:{rsi:.1f} | EQ:{eq_0d:.0f} | {dxy_tag}"
     run_ts = datetime.datetime.now(datetime.timezone.utc)
 
     init_db_table(conn, table_name)
@@ -122,9 +122,9 @@ if __name__ == "__main__":
     if not os.path.exists("data_m5.csv"):
         print("data_m5.csv missing.")
     else:
-        nas_status = get_nasdaq_direction()
-        print(f"Live Nasdaq Status: {nas_status}")
+        dxy_status = get_dxy_direction()
+        print(f"Live US Dollar Index Status: {dxy_status}")
         raw_df = pd.read_csv("data_m5.csv")
         with psycopg.connect(DB_URL) as conn:
             for tf in ["30m", "4h"]:
-                predict_for_timeframe(conn, raw_df, tf, nas_status)
+                predict_for_timeframe(conn, raw_df, tf, dxy_status)
