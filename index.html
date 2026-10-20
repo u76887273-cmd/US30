@@ -16,24 +16,28 @@
 <body class="min-h-screen flex flex-col items-center p-4 sm:p-8">
 
     <div class="max-w-5xl w-full">
-        <!-- Header + Current Price + Side Nasdaq Arrow -->
+        <!-- Header + Last Run Time (H:M) + Current Price + Side US$ Index Arrow -->
         <div class="glass rounded-2xl p-5 mb-6 shadow-xl flex flex-col sm:flex-row items-center justify-between gap-4">
             <div class="text-center sm:text-left">
                 <h1 class="text-4xl font-extrabold text-sky-400 glow-text tracking-tight">US30</h1>
             </div>
 
-            <!-- Live Price Only -->
-            <div class="flex items-center border-y sm:border-y-0 sm:border-x border-slate-700 py-3 sm:py-0 sm:px-10">
+            <!-- Last Run Time (H:M only) & Current Price -->
+            <div class="flex items-center gap-8 border-y sm:border-y-0 sm:border-x border-slate-700 py-3 sm:py-0 sm:px-8">
+                <div class="text-center">
+                    <p class="text-[11px] text-slate-400 uppercase tracking-wide">Latest Run</p>
+                    <p id="time-val" class="text-xl font-mono font-semibold text-slate-200 mt-0.5">--:--</p>
+                </div>
                 <div class="text-center">
                     <p class="text-[11px] text-slate-400 uppercase tracking-wide">Current Price</p>
                     <p id="price-val" class="text-3xl font-mono font-bold text-white mt-0.5">--</p>
                 </div>
             </div>
 
-            <!-- Side Nasdaq 100 (NAS100) Direction Arrow -->
+            <!-- Side US Dollar Index (#US$idx) Direction Arrow -->
             <div class="bg-slate-900/80 border border-slate-700 rounded-xl px-5 py-3 text-center min-w-[190px]">
-                <p class="text-[10px] text-slate-400 uppercase tracking-widest mb-1">Nasdaq 100 (NAS)</p>
-                <div id="nas-arrow" class="text-2xl font-extrabold font-mono text-slate-400">► WAIT</div>
+                <p class="text-[10px] text-slate-400 uppercase tracking-widest mb-1">US$ Index (#US$idx)</p>
+                <div id="dxy-arrow" class="text-2xl font-extrabold font-mono text-slate-400">► WAIT</div>
             </div>
         </div>
 
@@ -140,11 +144,12 @@
             return str.replace(/\b(\d+\.\d+)\b/g, (match) => Math.round(Number(match)).toString());
         }
 
-        function updateNasdaqArrow(rawReason) {
+        function updateDxyArrow(rawReason) {
             if (!rawReason) return;
-            const arrowEl = document.getElementById('nas-arrow');
+            const arrowEl = document.getElementById('dxy-arrow');
 
-            const match = rawReason.match(/NAS:(UP|DOWN|FLAT)/i);
+            // Supports DXY:UP/DOWN/FLAT (or legacy NAS:UP/DOWN/FLAT)
+            const match = rawReason.match(/(?:DXY|NAS):(UP|DOWN|FLAT)/i);
             if (match) {
                 const dir = match[1].toUpperCase();
                 if (dir === "UP") {
@@ -220,16 +225,20 @@
 
                 if (data30m && data30m.length > 0) {
                     const row30 = data30m[0];
+                    const runTime = new Date(row30.created_at || row30.timestamp);
+                    document.getElementById('time-val').innerText = runTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                     document.getElementById('price-val').innerText = Math.round(Number(row30.price)).toString();
                     renderTimeframeCard("30m", row30);
-                    updateNasdaqArrow(row30.reason);
+                    updateDxyArrow(row30.reason);
                 }
 
                 if (data4h && data4h.length > 0) {
                     const row4h = data4h[0];
                     if (!data30m || data30m.length === 0) {
+                        const runTime = new Date(row4h.created_at || row4h.timestamp);
+                        document.getElementById('time-val').innerText = runTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                         document.getElementById('price-val').innerText = Math.round(Number(row4h.price)).toString();
-                        updateNasdaqArrow(row4h.reason);
+                        updateDxyArrow(row4h.reason);
                     }
                     renderTimeframeCard("4h", row4h);
                 }
