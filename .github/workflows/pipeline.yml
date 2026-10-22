@@ -46,3 +46,5 @@ jobs:
 
       - name: 4. Run Grid State Validator
         run: python src/validator.py
+      - name: 5. Run 4H Database Backtest Report
+        run: python src/backtest_4h.py
