@@ -16,28 +16,22 @@
 <body class="min-h-screen flex flex-col items-center p-4 sm:p-8">
 
     <div class="max-w-5xl w-full">
-        <!-- Header + Last Run Time (H:M) + Current Price + Side US$ Index Arrow -->
+        <!-- Header + Last Run Time (H:M) + Current Price (DXY Card Removed) -->
         <div class="glass rounded-2xl p-5 mb-6 shadow-xl flex flex-col sm:flex-row items-center justify-between gap-4">
             <div class="text-center sm:text-left">
                 <h1 class="text-4xl font-extrabold text-sky-400 glow-text tracking-tight">US30</h1>
             </div>
 
             <!-- Last Run Time (H:M only) & Current Price -->
-            <div class="flex items-center gap-8 border-y sm:border-y-0 sm:border-x border-slate-700 py-3 sm:py-0 sm:px-8">
+            <div class="flex items-center gap-8 py-2 sm:py-0 sm:px-4">
                 <div class="text-center">
                     <p class="text-[11px] text-slate-400 uppercase tracking-wide">Latest Run</p>
                     <p id="time-val" class="text-xl font-mono font-semibold text-slate-200 mt-0.5">--:--</p>
                 </div>
-                <div class="text-center">
+                <div class="text-center border-l border-slate-700 pl-8">
                     <p class="text-[11px] text-slate-400 uppercase tracking-wide">Current Price</p>
                     <p id="price-val" class="text-3xl font-mono font-bold text-white mt-0.5">--</p>
                 </div>
-            </div>
-
-            <!-- Side US Dollar Index (#US$idx) Direction Arrow -->
-            <div class="bg-slate-900/80 border border-slate-700 rounded-xl px-5 py-3 text-center min-w-[190px]">
-                <p class="text-[10px] text-slate-400 uppercase tracking-widest mb-1">US$ Index (#US$idx)</p>
-                <div id="dxy-arrow" class="text-2xl font-extrabold font-mono text-slate-400">► WAIT</div>
             </div>
         </div>
 
@@ -52,7 +46,7 @@
                     </span>
                 </div>
 
-                <!-- Signal Area (Clean — No Bias/RSI/EQ Noise) -->
+                <!-- Signal Area -->
                 <div class="text-center py-8 bg-slate-800/50 rounded-xl border border-slate-700">
                     <p class="text-xs text-slate-400 uppercase tracking-widest mb-2">30M Final AI Signal</p>
                     <h2 id="signal-val-30m" class="text-5xl font-extrabold tracking-tight text-white">WAIT</h2>
@@ -87,7 +81,7 @@
                     </span>
                 </div>
 
-                <!-- Signal Area (Clean — No Bias/RSI/EQ Noise) -->
+                <!-- Signal Area -->
                 <div class="text-center py-8 bg-slate-800/50 rounded-xl border border-slate-700">
                     <p class="text-xs text-slate-400 uppercase tracking-widest mb-2">4H Final AI Signal</p>
                     <h2 id="signal-val-4h" class="text-5xl font-extrabold tracking-tight text-white">WAIT</h2>
@@ -142,27 +136,6 @@
         function formatPricesToInteger(str) {
             if (!str) return "--";
             return str.replace(/\b(\d+\.\d+)\b/g, (match) => Math.round(Number(match)).toString());
-        }
-
-        function updateDxyArrow(rawReason) {
-            if (!rawReason) return;
-            const arrowEl = document.getElementById('dxy-arrow');
-
-            // Supports DXY:UP/DOWN/FLAT (or legacy NAS:UP/DOWN/FLAT)
-            const match = rawReason.match(/(?:DXY|NAS):(UP|DOWN|FLAT)/i);
-            if (match) {
-                const dir = match[1].toUpperCase();
-                if (dir === "UP") {
-                    arrowEl.innerText = "▲ UP";
-                    arrowEl.className = "text-2xl font-extrabold font-mono text-emerald-400 glow-green";
-                } else if (dir === "DOWN") {
-                    arrowEl.innerText = "▼ DOWN";
-                    arrowEl.className = "text-2xl font-extrabold font-mono text-rose-400 glow-red";
-                } else {
-                    arrowEl.innerText = "► FLAT";
-                    arrowEl.className = "text-2xl font-extrabold font-mono text-slate-300";
-                }
-            }
         }
 
         function renderTimeframeCard(tf, row) {
@@ -229,7 +202,6 @@
                     document.getElementById('time-val').innerText = runTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                     document.getElementById('price-val').innerText = Math.round(Number(row30.price)).toString();
                     renderTimeframeCard("30m", row30);
-                    updateDxyArrow(row30.reason);
                 }
 
                 if (data4h && data4h.length > 0) {
@@ -238,7 +210,6 @@
                         const runTime = new Date(row4h.created_at || row4h.timestamp);
                         document.getElementById('time-val').innerText = runTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                         document.getElementById('price-val').innerText = Math.round(Number(row4h.price)).toString();
-                        updateDxyArrow(row4h.reason);
                     }
                     renderTimeframeCard("4h", row4h);
                 }
