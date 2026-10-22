@@ -1,6 +1,8 @@
 import os
+import joblib
 import psycopg
 import pandas as pd
+from train import build_features, FEATURES
 
 DB_URL = os.environ.get("DATABASE_URL")
 
@@ -15,115 +17,106 @@ def run_4h_backtest():
         print("Error: DATABASE_URL environment variable not set.")
         return
 
-    # 1. Load all 4H signals from the database
-    with psycopg.connect(DB_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, timestamp, price, signal, entry, take_profit, status
-                FROM supreme_grid_log_4h
-                ORDER BY timestamp ASC;
-            """)
-            rows = cur.fetchall()
-
-    if not rows:
-        print("No records found in supreme_grid_log_4h.")
+    if not os.path.exists("data_m5.csv") or not os.path.exists("model_4h.pkl"):
+        print("Missing data_m5.csv or model_4h.pkl required for simulation.")
         return
 
-    signals_df = pd.DataFrame(
-        rows,
-        columns=["id", "timestamp", "price", "signal", "entry", "take_profit", "status"]
-    )
-    signals_df["timestamp"] = pd.to_datetime(signals_df["timestamp"], utc=True)
-
-    # 2. Load M5 price bars if available to verify exact 4H outcomes and MTM drawdown
-    has_bars = os.path.exists("data_m5.csv")
-    bars_df = None
-    if has_bars:
-        bars_df = pd.read_csv("data_m5.csv")
-        bars_df["timestamp"] = pd.to_datetime(bars_df["timestamp"], utc=True)
-        bars_df = bars_df.sort_values("timestamp").reset_index(drop=True)
+    # 1. Load M5 data and build 4H features
+    raw_df = pd.read_csv("data_m5.csv")
+    raw_df["timestamp"] = pd.to_datetime(raw_df["timestamp"], utc=True)
+    raw_df = raw_df.sort_values("timestamp").reset_index(drop=True)
+    
+    df_feat = build_features(raw_df, "4h").dropna().reset_index(drop=True)
+    models = joblib.load("model_4h.pkl")
 
     wins = 0
     losses = 0
-    open_or_pending = 0
+    skipped_wait = 0
     total_points = 0.0
     win_points = 0.0
     loss_points = 0.0
 
-    for _, row in signals_df.iterrows():
-        sig = row["signal"]
-        if sig not in ("BUY", "SELL") or row["take_profit"] is None:
+    # 2. Simulate rolling over historical bars to apply the 60% rule dynamically
+    # Start after enough bars for feature history
+    for i in range(100, len(df_feat) - HORIZON_BARS):
+        hist_slice = df_feat.iloc[:i+1]
+        latest_row = hist_slice.iloc[[-1]]
+        X_latest = latest_row[FEATURES]
+
+        price = float(latest_row["close"].iloc[0])
+        pred_up = float(models["up"].predict(X_latest)[0])
+        pred_down = float(models["down"].predict(X_latest)[0])
+
+        proj_high = price + pred_up
+        proj_low = price - pred_down
+        total_range = max(proj_high - proj_low, 10.0)
+
+        midline_eq = (proj_high + proj_low) / 2.0
+        half_range = total_range / 2.0
+
+        # Apply the new 60% Distance Threshold Rules
+        sell_trigger = midline_eq + (half_range * 0.60)
+        buy_trigger = midline_eq - (half_range * 0.60)
+
+        if price <= buy_trigger:
+            signal = "BUY"
+        elif price >= sell_trigger:
+            signal = "SELL"
+        else:
+            signal = "WAIT"
+
+        if signal == "WAIT":
+            skipped_wait += 1
             continue
 
-        entry_price = float(row["entry"] if row["entry"] is not None else row["price"])
-        tp_price = float(row["take_profit"])
-        sig_time = row["timestamp"]
-        db_status = str(row["status"]).upper()
+        tp_price = midline_eq
+        entry_price = price
 
-        # Check forward 4-hour price action in data_m5.csv if covered
-        future_bars = pd.DataFrame()
-        if bars_df is not None:
-            future_bars = bars_df[bars_df["timestamp"] > sig_time].head(HORIZON_BARS)
+        # Look at the forward 4H window (48 bars)
+        future_bars = df_feat.iloc[i+1 : i+1+HORIZON_BARS]
+        if future_bars.empty:
+            continue
 
-        if not future_bars.empty:
-            max_high = float(future_bars["high"].max())
-            min_low = float(future_bars["low"].min())
-            end_close = float(future_bars["close"].iloc[-1])
+        max_high = float(future_bars["high"].max())
+        min_low = float(future_bars["low"].min())
+        end_close = float(future_bars["close"].iloc[-1])
 
-            if sig == "BUY":
-                if max_high >= tp_price or db_status in ("HIT_TP", "WIN_TP"):
-                    pts = abs(tp_price - entry_price)
-                    wins += 1
-                    win_points += pts
-                    total_points += pts
-                else:
-                    # Closed at end of 4H horizon
-                    pts = end_close - entry_price
-                    if pts >= 0:
-                        wins += 1
-                        win_points += pts
-                    else:
-                        losses += 1
-                        loss_points += abs(pts)
-                    total_points += pts
-
-            elif sig == "SELL":
-                if min_low <= tp_price or db_status in ("HIT_TP", "WIN_TP"):
-                    pts = abs(entry_price - tp_price)
-                    wins += 1
-                    win_points += pts
-                    total_points += pts
-                else:
-                    # Closed at end of 4H horizon
-                    pts = entry_price - end_close
-                    if pts >= 0:
-                        wins += 1
-                        win_points += pts
-                    else:
-                        losses += 1
-                        loss_points += abs(pts)
-                    total_points += pts
-        else:
-            # Fallback to database status if signal is older than data_m5.csv window
-            if db_status in ("HIT_TP", "WIN_TP"):
+        if signal == "BUY":
+            if max_high >= tp_price:
                 pts = abs(tp_price - entry_price)
                 wins += 1
                 win_points += pts
                 total_points += pts
-            elif db_status in ("LOSS", "STOPPED", "SL"):
-                pts = abs(tp_price - entry_price)
-                losses += 1
-                loss_points += pts
-                total_points -= pts
             else:
-                # Signal is still ACTIVE and waiting for future bars
-                open_or_pending += 1
+                pts = end_close - entry_price
+                if pts >= 0:
+                    wins += 1
+                    win_points += pts
+                else:
+                    losses += 1
+                    loss_points += abs(pts)
+                total_points += pts
+
+        elif signal == "SELL":
+            if min_low <= tp_price:
+                pts = abs(entry_price - tp_price)
+                wins += 1
+                win_points += pts
+                total_points += pts
+            else:
+                pts = entry_price - end_close
+                if pts >= 0:
+                    wins += 1
+                    win_points += pts
+                else:
+                    losses += 1
+                    loss_points += abs(pts)
+                total_points += pts
 
     total_closed = wins + losses
     win_rate = (wins / total_closed * 100.0) if total_closed > 0 else 0.0
 
-    # Sample price for margin calculation
-    latest_price = float(signals_df["price"].iloc[-1])
+    latest_price = float(df_feat["close"].iloc[-1])
 
     # Contract Spec A: 1 Lot = $1/pt -> 0.02 Lot = $0.02/pt
     val_per_pt_std = LOT_SIZE * 1.0
@@ -138,28 +131,24 @@ def run_4h_backtest():
     margin_idx = (latest_price * LOT_SIZE * 10.0) / LEVERAGE
 
     print("=" * 55)
-    print("       US30 4-HOUR (4H) DATABASE BACKTEST REPORT       ")
+    print("   US30 4H BACKTEST (WITH 60% THRESHOLD RULE APPLIED)   ")
     print("=" * 55)
-    print(f"Total 4H Signals in DB : {len(signals_df)}")
-    print(f"Completed Trades       : {total_closed} (Still Active: {open_or_pending})")
+    print(f"Skipped (WAIT signals) : {skipped_wait}")
+    print(f"Executed Trades        : {total_closed}")
     print(f"Winning Trades (Wins)  : {wins}")
     print(f"Losing Trades (Losses) : {losses}")
     print(f"Win Rate               : {win_rate:.2f}%")
     print("-" * 55)
-    print(f"Gross Points Won       : +{win_points:.1f} pts")
-    print(f"Gross Points Lost      : -{loss_points:.1f} pts")
     print(f"Net Points Gained      : {total_points:+.1f} pts")
     print("-" * 55)
     print(f"Starting Balance       : ${INITIAL_BALANCE:,.2f}")
     print(f"Entry Lot Size         : {LOT_SIZE} Lots (Leverage 1:{LEVERAGE})")
     print("-" * 55)
     print("[Broker Spec A: 1 Lot = $1/pt  -> 0.02 Lot = $0.02/pt]")
-    print(f"  Margin Used / Trade  : ${margin_std:.2f}")
     print(f"  Net Gain / Loss      : ${net_profit_std:+,.2f} ({(net_profit_std/INITIAL_BALANCE)*100:+.2f}%)")
     print(f"  Final Account Balance: ${final_bal_std:,.2f}")
     print("-" * 55)
     print("[Broker Spec B: 1 Lot = $10/pt -> 0.02 Lot = $0.20/pt]")
-    print(f"  Margin Used / Trade  : ${margin_idx:.2f}")
     print(f"  Net Gain / Loss      : ${net_profit_idx:+,.2f} ({(net_profit_idx/INITIAL_BALANCE)*100:+.2f}%)")
     print(f"  Final Account Balance: ${final_bal_idx:,.2f}")
     print("=" * 55)
