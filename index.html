@@ -16,13 +16,13 @@
 <body class="min-h-screen flex flex-col items-center p-4 sm:p-8">
 
     <div class="max-w-5xl w-full">
-        <!-- Header + Last Run Time (H:M) + Current Price (DXY Card Removed) -->
+        <!-- Header + Latest Run Time (H:M) + Current Price -->
         <div class="glass rounded-2xl p-5 mb-6 shadow-xl flex flex-col sm:flex-row items-center justify-between gap-4">
             <div class="text-center sm:text-left">
                 <h1 class="text-4xl font-extrabold text-sky-400 glow-text tracking-tight">US30</h1>
             </div>
 
-            <!-- Last Run Time (H:M only) & Current Price -->
+            <!-- Latest Run Time (H:M only) & Current Price -->
             <div class="flex items-center gap-8 py-2 sm:py-0 sm:px-4">
                 <div class="text-center">
                     <p class="text-[11px] text-slate-400 uppercase tracking-wide">Latest Run</p>
@@ -191,10 +191,13 @@
 
         async function fetchData() {
             try {
-                const [data30m, data4h] = await Promise.all([
+                const [res30m, res4h] = await Promise.allSettled([
                     fetchTableLatest("supreme_grid_log"),
                     fetchTableLatest("supreme_grid_log_4h")
                 ]);
+
+                const data30m = res30m.status === "fulfilled" ? res30m.value : [];
+                const data4h = res4h.status === "fulfilled" ? res4h.value : [];
 
                 if (data30m && data30m.length > 0) {
                     const row30 = data30m[0];
