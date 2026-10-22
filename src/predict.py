@@ -73,12 +73,13 @@ def predict_for_timeframe(conn, raw_df, tf, dxy_tag):
     proj_low = price - pred_down
     total_range = max(proj_high - proj_low, 10.0)
 
-    # Equilibrium (Midline of AI Projected Range)
+    # Equilibrium (Midline of AI Projected Range) & Half-Range (Distance from EQ to Limit)
     midline_eq = (proj_high + proj_low) / 2.0
+    half_range = total_range / 2.0
 
     # 60% Distance Thresholds from Equilibrium (EQ) to Upper/Lower Limits
-    sell_trigger = midline_eq + 0.60 * (proj_high - midline_eq)
-    buy_trigger = midline_eq - 0.60 * (midline_eq - proj_low)
+    sell_trigger = midline_eq + (half_range * 0.60)
+    buy_trigger = midline_eq - (half_range * 0.60)
 
     if price <= buy_trigger:
         signal = "BUY"
@@ -87,8 +88,8 @@ def predict_for_timeframe(conn, raw_df, tf, dxy_tag):
     else:
         signal = "WAIT"
 
-    # Dynamic 20% Entry Limit Zones sliced from Projected High/Low Range
-    zone_height = max(total_range * 0.20, 5.0)
+    # Dynamic 20% Entry Limit Zones (20% of the distance from EQ to Upper/Lower Limit)
+    zone_height = max(half_range * 0.20, 5.0)
     buy_low = round(proj_low, 0)
     buy_high = round(proj_low + zone_height, 0)
     sell_low = round(proj_high - zone_height, 0)
