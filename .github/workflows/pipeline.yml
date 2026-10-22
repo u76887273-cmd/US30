@@ -2,8 +2,8 @@ name: US30 Quantum Live Engine
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch:
+    - cron: '*/15 * * * *'   # Runs every 15 minutes (4x/hour instead of 12x/hour)
+  workflow_dispatch:         # Allows manual "Force Run" anytime
 
 permissions:
   contents: write
@@ -35,16 +35,40 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
+      # Cache the trained .pkl models across 15-minute runs so we only train ONCE per day
+      - name: Restore Today's Trained AI Models from Cache
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            model_30m.pkl
+            model_4h.pkl
+            data_m5.csv
+          key: ai-models-${{ runner.os }}-${{ steps.date.outputs.today }}
+          restore-keys: |
+            ai-models-${{ runner.os }}-
+
       - name: 1. Fetch Live Market Data (cTrader)
         run: python src/data.py
 
-      - name: 2. Daily AI Model Retraining (Once Per Day)
-        run: python src/train.py
+      - name: 2. Daily AI Model Retraining (Once Per Day or Manual Run)
+        run: |
+          CURRENT_HOUR=$(date -u +%H)
+          CURRENT_MIN=$(date -u +%M)
+          # Train if:
+          # 1) Triggered manually via "Run workflow" button, OR
+          # 2) Model files don't exist yet in cache/repo, OR
+          # 3) It is the daily 00:00 - 00:14 UTC training window
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ ! -f "model_4h.pkl" ] || [ ! -f "model_30m.pkl" ] || ( [ "$CURRENT_HOUR" = "00" ] && [ "$CURRENT_MIN" -lt "15" ] ); then
+            echo "🔄 Running Daily AI Model Training on Full 40,000+ Bars..."
+            python src/train.py
+          else
+            echo "✅ Models already trained today! Skipping heavy training to save GitHub minutes."
+          fi
 
-      - name: 3. Run AI Prediction Engine
+      - name: 3. Run AI Prediction Engine (Every 15 Mins)
         run: python src/predict.py
 
       - name: 4. Run Grid State Validator
         run: python src/validator.py
-      - name: 5. Run 4H Database Backtest Report
-        run: python src/backtest_4h.py
+
