@@ -76,10 +76,13 @@ def predict_for_timeframe(conn, raw_df, tf, dxy_tag):
     # Equilibrium (Midline of AI Projected Range)
     midline_eq = (proj_high + proj_low) / 2.0
 
-    # Pure Midline Rule
-    if price < midline_eq:
+    # 60% Distance Thresholds from Equilibrium (EQ) to Upper/Lower Limits
+    sell_trigger = midline_eq + 0.60 * (proj_high - midline_eq)
+    buy_trigger = midline_eq - 0.60 * (midline_eq - proj_low)
+
+    if price <= buy_trigger:
         signal = "BUY"
-    elif price > midline_eq:
+    elif price >= sell_trigger:
         signal = "SELL"
     else:
         signal = "WAIT"
@@ -103,7 +106,7 @@ def predict_for_timeframe(conn, raw_df, tf, dxy_tag):
 
     up_ratio = (pred_up / total_range) * 100.0
     down_ratio = (pred_down / total_range) * 100.0
-    bias_pct = up_ratio if signal == "BUY" else down_ratio
+    bias_pct = up_ratio if price < midline_eq else down_ratio
 
     reason = f"Bias:{bias_pct:.1f}% | RSI:{rsi:.1f} | EQ:{eq_0d:.0f} | {dxy_tag}"
     run_ts = datetime.datetime.now(datetime.timezone.utc)
@@ -116,7 +119,7 @@ def predict_for_timeframe(conn, raw_df, tf, dxy_tag):
             VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE')
         """, (run_ts, price_0d, signal, reason, entry_zone, price_0d, eq_0d))
     conn.commit()
-    print(f"[{tf.upper()}] {signal} @ {price_0d:.0f} | RSI: {rsi:.1f} | EQ/TP: {eq_0d:.0f}")
+    print(f"[{tf.upper()}] {signal} @ {price_0d:.0f} | Buy<={buy_trigger:.0f} Sell>={sell_trigger:.0f} | EQ/TP: {eq_0d:.0f}")
 
 if __name__ == "__main__":
     if not os.path.exists("data_m5.csv"):
