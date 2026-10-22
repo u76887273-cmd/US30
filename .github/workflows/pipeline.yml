@@ -3,7 +3,12 @@ name: US30 Quantum Live Engine
 on:
   schedule:
     - cron: '*/15 * * * *'   # Runs every 15 minutes
-  workflow_dispatch:         # Allows manual "Force Run" anytime
+  workflow_dispatch:         # Triggered by Dashboard "Force Engine Run" button
+    inputs:
+      force_train:
+        description: 'Force AI model retraining?'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -35,7 +40,12 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      # Cache the trained .pkl models across 15-minute runs so we only train ONCE per day
+      # Get current UTC date & hour so the cache key properly saves today's trained models
+      - name: Get Current UTC Date
+        id: date
+        run: echo "today=$(date -u +%Y-%m-%d)" >> $GITHUB_OUTPUT
+
+      # Cache the trained .pkl models across runs so we only train ONCE per day
       - name: Restore Today's Trained AI Models from Cache
         id: model-cache
         uses: actions/cache@v4
@@ -44,29 +54,30 @@ jobs:
             model_30m.pkl
             model_4h.pkl
             data_m5.csv
-          key: ai-models-${{ runner.os }}-${{ steps.date.outputs.today }}
+          key: ai-models-${{ runner.os }}-${{ steps.date.outputs.today }}-${{ github.run_id }}
           restore-keys: |
+            ai-models-${{ runner.os }}-${{ steps.date.outputs.today }}-
             ai-models-${{ runner.os }}-
 
       - name: 1. Fetch Live Market Data (cTrader)
         run: python src/data.py
 
-      - name: 2. Daily AI Model Retraining (Once Per Day or Manual Run)
+      - name: 2. Daily AI Model Retraining (Once Per Day Only)
         run: |
           CURRENT_HOUR=$(date -u +%H)
           CURRENT_MIN=$(date -u +%M)
-          # Train if:
-          # 1) Triggered manually via "Run workflow" button, OR
-          # 2) Model files don't exist yet in cache/repo, OR
-          # 3) It is the daily 00:00 - 00:14 UTC training window
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ ! -f "model_4h.pkl" ] || [ ! -f "model_30m.pkl" ] || ( [ "$CURRENT_HOUR" = "00" ] && [ "$CURRENT_MIN" -lt "15" ] ); then
+          # Only train if:
+          # 1) Model files are missing from cache, OR
+          # 2) It is the daily 00:00 - 00:14 UTC training window, OR
+          # 3) You explicitly set force_train to 'true' inside GitHub
+          if [ "${{ github.event.inputs.force_train }}" = "true" ] || [ ! -f "model_4h.pkl" ] || [ ! -f "model_30m.pkl" ] || ( [ "$CURRENT_HOUR" = "00" ] && [ "$CURRENT_MIN" -lt "15" ] ); then
             echo "🔄 Running Daily AI Model Training on Full 40,000+ Bars..."
             python src/train.py
           else
-            echo "✅ Models already trained today! Skipping heavy training to save GitHub minutes."
+            echo "⚡ Skipping training! Using cached AI models for fast prediction."
           fi
 
-      - name: 3. Run AI Prediction Engine (Every 15 Mins)
+      - name: 3. Run AI Prediction Engine
         run: python src/predict.py
 
       - name: 4. Run Grid State Validator
