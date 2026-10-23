@@ -2,7 +2,6 @@ name: US30 Quantum Dual Engine (30M & 4H)
 
 on:
   schedule:
-    # Runs every 15 minutes, 24/5 (Monday through Friday)
     - cron: '*/15 * * * 1-5'
   workflow_dispatch:
     inputs:
@@ -11,7 +10,6 @@ on:
         required: false
         default: 'false'
 
-# Prevent overlapping runs if a manual Force Run is clicked right as a 15m cron starts
 concurrency:
   group: us30-quantum-pipeline
   cancel-in-progress: false
@@ -33,6 +31,19 @@ jobs:
     steps:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
+
+      - name: 🔍 Normalize Script Filenames & Locations
+        run: |
+          echo "=== Files currently in repository ==="
+          find . -maxdepth 3 -not -path '*/.*'
+          # Normalize case/location if mobile keyboard capitalized filenames (e.g., Data.py -> data.py)
+          for script in data.py train.py predict.py validator.py requirements.txt; do
+            found=$(find . -maxdepth 3 -iname "$script" | head -n 1)
+            if [ -n "$found" ] && [ "$found" != "./$script" ]; then
+              echo "Moving $found -> ./$script"
+              cp "$found" "./$script"
+            fi
+          done
 
       - name: 🐍 Set up Python 3.11
         uses: actions/setup-python@v5
@@ -60,7 +71,6 @@ jobs:
           path: |
             model_30m.pkl
             model_4h.pkl
-          # Key changes once per UTC day -> trains once per day, reuses cache on all other 15m runs!
           key: us30-models-9feat-${{ steps.get-date.outputs.DATE_UTC }}
 
       - name: 📡 Step 1 - Fetch Latest Closed M5 Bars (data.py)
