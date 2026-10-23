@@ -180,8 +180,9 @@ def train_horizon(raw_df, tf_name, horizon_bars):
     df["target_up"] = (future_high - df["ema_fast"]).clip(lower=1.0)
     df["target_down"] = (df["ema_fast"] - future_low).clip(lower=1.0)
 
-    df_clean = df.dropna(subset=FEATURES + ["target_up", "target_down"]).reset_index(drop=True)
-    X = df_clean[FEATURES]
+    # Exclude the trailing horizon_bars rows where future window is incomplete
+    df_valid = df.iloc[:-horizon_bars].dropna(subset=FEATURES + ["target_up", "target_down"]).reset_index(drop=True)
+    X = df_valid[FEATURES]
 
     model_up = RandomForestRegressor(
         n_estimators=120, max_depth=10, min_samples_leaf=20, random_state=42, n_jobs=-1
@@ -190,14 +191,14 @@ def train_horizon(raw_df, tf_name, horizon_bars):
         n_estimators=120, max_depth=10, min_samples_leaf=20, random_state=42, n_jobs=-1
     )
 
-    model_up.fit(X, df_clean["target_up"])
-    model_down.fit(X, df_clean["target_down"])
+    model_up.fit(X, df_valid["target_up"])
+    model_down.fit(X, df_valid["target_down"])
 
     joblib.dump({"up": model_up, "down": model_down}, f"model_{tf_name}.pkl")
     print(
         f"[{tf_name.upper()}] Trained Anchored Regressors on {len(X):,} bars "
-        f"({df_clean['timestamp'].iloc[0]} --> {df_clean['timestamp'].iloc[-1]} | "
-        f"Latest {tf_name.upper()} RSI: {df_clean['rsi'].iloc[-1]:.1f})"
+        f"({df_valid['timestamp'].iloc[0]} --> {df_valid['timestamp'].iloc[-1]} | "
+        f"Latest {tf_name.upper()} RSI: {df['rsi'].iloc[-1]:.1f})"
     )
 
 if __name__ == "__main__":
