@@ -1,9 +1,10 @@
 import os
+import json
 import datetime
 import joblib
 import psycopg
 import pandas as pd
-from train import build_features, train_horizon, FEATURES, HORIZONS
+from train import build_features, FEATURES
 
 DB_URL = os.environ.get("DATABASE_URL")
 RAW_BARS_TABLE = "m5_bars"
@@ -14,18 +15,25 @@ TABLES = {
 }
 
 def parse_mixed_timestamps(series):
-    """Safely parses all ISO8601 and mixed timestamps without dropping rows."""
     try:
         return pd.to_datetime(series, format="ISO8601", utc=True, errors="coerce")
     except Exception:
         return pd.to_datetime(series, format="mixed", utc=True, errors="coerce")
 
-def sync_recent_bars_and_load_warmup(conn):
-    """
-    1. Syncs any new 5m bars fetched by data.py into Supabase 'm5_bars' every 15 mins.
-    2. Combines local data_m5.csv and the latest 1,500 bars from 'm5_bars' so the 4H indicators
-       always have enough warmup bars even on runs where train.py is skipped.
-    """
+def get_live_spot_quote():
+    """Reads latest_quote.json produced by data.py to get the exact real-time cTrader BID."""
+    if os.path.exists("latest_quote.json"):
+        try:
+            with open("latest_quote.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+            price = data.get("current_price")
+            if price is not None and float(price) > 1000:
+                return float(price)
+        except Exception as e:
+            print(f"Note reading latest_quote.json: {e}")
+    return None
+
+def sync_recent_bars_and_load_warmup(conn, live_spot):
     local_df = pd.DataFrame()
     if os.path.exists("data_m5.csv"):
         try:
@@ -35,14 +43,18 @@ def sync_recent_bars_and_load_warmup(conn):
                 local_df["timestamp"] = parse_mixed_timestamps(local_df["timestamp"])
                 for col in ["open", "high", "low", "close"]:
                     local_df[col] = pd.to_numeric(local_df[col], errors="coerce")
-                if "volume" in local_df.columns:
-                    local_df["volume"] = pd.to_numeric(local_df["volume"], errors="coerce").fillna(0.0)
-                else:
-                    local_df["volume"] = 0.0
-
+                local_df["volume"] = pd.to_numeric(local_df.get("volume", 0.0), errors="coerce").fillna(0.0)
                 local_df = local_df.dropna(subset=["timestamp", "open", "high", "low", "close"]).sort_values("timestamp")
 
-                # Sync up to the newest 500 bars from data_m5.csv into Supabase m5_bars
+                # Ensure last bar reflects live spot quote
+                if live_spot is not None and not local_df.empty:
+                    idx = local_df.index[-1]
+                    local_df.loc[idx, "close"] = live_spot
+                    if live_spot > float(local_df.loc[idx, "high"]):
+                        local_df.loc[idx, "high"] = live_spot
+                    if live_spot < float(local_df.loc[idx, "low"]):
+                        local_df.loc[idx, "low"] = live_spot
+
                 recent_slice = local_df.tail(500)
                 with conn.cursor() as cur:
                     insert_data = [
@@ -68,7 +80,6 @@ def sync_recent_bars_and_load_warmup(conn):
         except Exception as e:
             print(f"Note on live bar sync: {e}")
 
-    # Pull the latest 1,500 bars from Supabase m5_bars
     db_df = pd.DataFrame()
     try:
         with conn.cursor() as cur:
@@ -90,7 +101,6 @@ def sync_recent_bars_and_load_warmup(conn):
     except Exception as e:
         print(f"Note on DB warmup fetch: {e}")
 
-    # Combine DB and local bars so we always have maximum history for 4H warmup
     combined = pd.concat([db_df, local_df], ignore_index=True)
     combined = (
         combined.dropna(subset=["timestamp", "open", "high", "low", "close"])
@@ -99,6 +109,16 @@ def sync_recent_bars_and_load_warmup(conn):
         .tail(1500)
         .reset_index(drop=True)
     )
+
+    # Guarantee the final warmup row has the exact live spot price
+    if live_spot is not None and not combined.empty:
+        idx = combined.index[-1]
+        combined.loc[idx, "close"] = live_spot
+        if live_spot > float(combined.loc[idx, "high"]):
+            combined.loc[idx, "high"] = live_spot
+        if live_spot < float(combined.loc[idx, "low"]):
+            combined.loc[idx, "low"] = live_spot
+
     return combined
 
 def init_db_table(conn, table_name):
@@ -120,51 +140,42 @@ def init_db_table(conn, table_name):
         """)
     conn.commit()
 
-def predict_for_timeframe(conn, raw_df, tf):
+def predict_for_timeframe(conn, raw_df, tf, live_spot):
     model_path = f"model_{tf}.pkl"
     table_name = TABLES[tf]
 
     if not os.path.exists(model_path):
-        print(f"[{tf.upper()}] Model file {model_path} missing. Training now...")
-        train_horizon(raw_df, tf, HORIZONS[tf])
+        print(f"[{tf.upper()}] Model file {model_path} missing.")
+        return
 
-    models = joblib.load(model_path)
-
-    # Self-healing check: if cached model was trained on old 6 features, retrain on new 9 features
-    expected_features = len(FEATURES)
-    actual_features = getattr(models["up"], "n_features_in_", expected_features)
-    if actual_features != expected_features:
-        print(f"[{tf.upper()}] Cached model has {actual_features} features (expected {expected_features}). Retraining...")
-        train_horizon(raw_df, tf, HORIZONS[tf])
-        models = joblib.load(model_path)
-
-    # Build timeframe-specific features so 30m and 4h each have their own true Wilder's RSI & EMAs
     df_feat = build_features(raw_df, tf).dropna(subset=FEATURES).reset_index(drop=True)
     if df_feat.empty:
         print(f"[{tf.upper()}] Not enough warmup bars to compute features (rows={len(raw_df)}).")
         return
 
+    models = joblib.load(model_path)
     latest_row = df_feat.iloc[[-1]]
-    X_latest = latest_row[FEATURES]
 
-    price = float(latest_row["close"].iloc[0])
+    # Backward-compatible feature selection in case cached model was trained before ema_stretch was added
+    model_features = list(getattr(models["up"], "feature_names_in_", FEATURES))
+    X_latest = latest_row[model_features]
+
+    price = float(live_spot) if live_spot is not None else float(latest_row["close"].iloc[0])
     rsi = float(latest_row["rsi"].iloc[0])
     anchor_ema = float(latest_row["ema_fast"].iloc[0])
 
-    # Predict Upside and Downside stretch relative to anchor_ema
     pred_up = float(models["up"].predict(X_latest)[0])
     pred_down = float(models["down"].predict(X_latest)[0])
 
-    # Anchor projected range to the timeframe's structural EMA (matches train.py target_up/target_down)
+    # Anchor projected range to the structural EMA so price can naturally reach 0.60 triggers
     proj_high = anchor_ema + pred_up
     proj_low = anchor_ema - pred_down
     total_range = max(proj_high - proj_low, 10.0)
 
-    # Equilibrium (Midline of AI Projected Range) & Half-Range (Distance from EQ to Limit)
     midline_eq = (proj_high + proj_low) / 2.0
     half_range = total_range / 2.0
 
-    # 60% Distance Thresholds (0.60) applied to BOTH 30m and 4h
+    # 60% Distance Thresholds (0.60) kept for BOTH 30m and 4h
     sell_trigger = midline_eq + (half_range * 0.60)
     buy_trigger = midline_eq - (half_range * 0.60)
 
@@ -175,7 +186,6 @@ def predict_for_timeframe(conn, raw_df, tf):
     else:
         signal = "WAIT"
 
-    # Dynamic 20% Entry Limit Zones (20% of the distance from EQ to Upper/Lower Limit)
     zone_height = max(half_range * 0.20, 5.0)
     buy_low = round(proj_low, 0)
     buy_high = round(proj_low + zone_height, 0)
@@ -207,10 +217,11 @@ def predict_for_timeframe(conn, raw_df, tf):
             VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE')
         """, (run_ts, price_0d, signal, reason, entry_zone, price_0d, eq_0d))
     conn.commit()
-    print(f"[{tf.upper()}] {signal} @ {price_0d:.0f} | AnchorEMA:{anchor_ema:.0f} | Buy<={buy_trigger:.0f} Sell>={sell_trigger:.0f} | EQ/TP: {eq_0d:.0f} | {reason}")
+    print(f"[{tf.upper()}] {signal} @ {price_0d:.0f} (Live Spot: {price:.2f}) | AnchorEMA:{anchor_ema:.0f} | Buy<={buy_trigger:.0f} Sell>={sell_trigger:.0f} | EQ/TP: {eq_0d:.0f} | {reason}")
 
 if __name__ == "__main__":
+    live_spot = get_live_spot_quote()
     with psycopg.connect(DB_URL) as conn:
-        raw_df = sync_recent_bars_and_load_warmup(conn)
+        raw_df = sync_recent_bars_and_load_warmup(conn, live_spot)
         for tf in ["30m", "4h"]:
-            predict_for_timeframe(conn, raw_df, tf)
+            predict_for_timeframe(conn, raw_df, tf, live_spot)
