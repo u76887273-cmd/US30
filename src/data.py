@@ -282,7 +282,7 @@ def on_message_received(_client, message):
 
 
 def disconnected(_client, _reason):
-    pass  # Suppress noisy Twisted disconnect traceback on normal exit
+    pass
 
 
 if __name__ == "__main__":
@@ -297,6 +297,18 @@ if __name__ == "__main__":
     if missing:
         print("⚠️ Notice: Missing environment variable(s): " + ", ".join(missing))
         sys.exit(0)
+
+    # Reset quote status before connecting so old quotes are never reused
+    write_json_atomic(
+        DATA_DIR / "latest_quote.json",
+        {
+            "status": "PENDING",
+            "symbol": symbol_name,
+            "symbol_id": SYMBOL_ID,
+            "current_price": None,
+            "received_at_utc": iso_utc(utc_now()),
+        },
+    )
 
     timeout_call = reactor.callLater(40, on_timeout)
     client.setConnectedCallback(connected)
