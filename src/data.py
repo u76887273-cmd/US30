@@ -47,20 +47,12 @@ def on_timeout():
         reactor.stop()
 
 def on_error(failure):
-    print(f"⚠️ cTrader API Error: {failure}")
+    print(f"❌ cTrader API Error: {failure}")
     stop_reactor_safely()
-
-def get_last_closed_m5_boundary(now_utc):
-    """Returns the exact UTC timestamp of the most recent fully closed M5 candle boundary."""
-    floored_minute = (now_utc.minute // 5) * 5
-    return now_utc.replace(minute=floored_minute, second=0, microsecond=0)
 
 def on_trendbars(result):
     res = Protobuf.extract(result)
     rows = []
-
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    last_closed_boundary = get_last_closed_m5_boundary(now_utc)
 
     for b in res.trendbar:
         # Auto-detect cTrader scaling (100000.0 for Open API v2 standard, or 100.0 for legacy/digits)
@@ -72,10 +64,6 @@ def on_trendbars(result):
         high_p = (b.low + b.deltaHigh) / scale
         ts = datetime.datetime.fromtimestamp(b.utcTimestampInMinutes * 60, tz=datetime.timezone.utc)
 
-        # Drop any currently forming (unclosed) M5 candle
-        if ts + datetime.timedelta(minutes=5) > last_closed_boundary:
-            continue
-
         rows.append({
             "timestamp": ts.isoformat(),
             "open": round(open_p, 2),
@@ -86,7 +74,7 @@ def on_trendbars(result):
         })
 
     if not rows:
-        print("⚠️ No new closed M5 bars returned from cTrader (market may be closed). Keeping existing data_m5.csv.")
+        print("⚠️ No M5 bars returned from cTrader.")
         stop_reactor_safely()
         return
 
@@ -102,18 +90,19 @@ def on_trendbars(result):
     df.to_csv("data_4h.csv", index=False)
 
     print(
-        f"[M5] Saved {len(df):,} closed 5-min bars "
-        f"(Latest bar: {df['timestamp'].iloc[-1]} | Close: {df['close'].iloc[-1]:.2f})"
+        f"[M5] Saved {len(df):,} 5-min bars "
+        f"(Latest bar: {df['timestamp'].iloc[-1]} | Live Close: {df['close'].iloc[-1]:.2f})"
     )
     stop_reactor_safely()
 
 def on_account_auth(result):
-    print("cTrader account authenticated. Pulling closed US30 M5 bars...")
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    last_closed_boundary = get_last_closed_m5_boundary(now_utc)
+    print("cTrader account authenticated. Pulling latest US30 M5 bars...")
+    now = datetime.datetime.now(datetime.timezone.utc)
 
-    from_ts = int((last_closed_boundary - datetime.timedelta(days=14)).timestamp() * 1000)
-    to_ts = int(last_closed_boundary.timestamp() * 1000)
+    # CRITICAL FIX: Request 5 days (~1,000 M5 bars) instead of 14 days (~2,880 bars)
+    # so cTrader NEVER truncates the newest bars at its ~2,000-bar response limit!
+    from_ts = int((now - datetime.timedelta(days=5)).timestamp() * 1000)
+    to_ts = int(now.timestamp() * 1000)
 
     req = ProtoOAGetTrendbarsReq()
     req.ctidTraderAccountId = ACCOUNT_ID
@@ -153,7 +142,6 @@ if __name__ == "__main__":
     ]
     if missing:
         print(f"⚠️ Notice: Missing cTrader env var(s): {', '.join(missing)}")
-        print("⚠️ Proceeding with existing data_m5.csv / Supabase m5_bars so train & predict still run.")
         sys.exit(0)
 
     timeout_call = reactor.callLater(45, on_timeout)
