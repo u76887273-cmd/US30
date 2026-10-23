@@ -8,11 +8,28 @@ from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import *
 from ctrader_open_api.messages.OpenApiMessages_pb2 import *
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import *
 
-CLIENT_ID = os.environ.get("CTRADER_CLIENT_ID")
-CLIENT_SECRET = os.environ.get("CTRADER_CLIENT_SECRET")
-ACCESS_TOKEN = os.environ.get("CTRADER_ACCESS_TOKEN")
-ACCOUNT_ID = int(os.environ.get("ACCOUNT_ID") or os.environ.get("CTRADER_ACCOUNT_ID") or 0)
-SYMBOL_ID = int(os.environ.get("SYMBOL_ID") or 1287)  # US30 Symbol ID = 1287
+def get_env_str(*keys):
+    for k in keys:
+        val = os.environ.get(k)
+        if val and str(val).strip():
+            return str(val).strip()
+    return ""
+
+def get_env_int(*keys, default=0):
+    for k in keys:
+        val = os.environ.get(k)
+        if val and str(val).strip():
+            try:
+                return int(str(val).strip())
+            except ValueError:
+                continue
+    return default
+
+CLIENT_ID = get_env_str("CTRADER_CLIENT_ID", "CLIENT_ID", "CTRADER_ID", "APP_CLIENT_ID")
+CLIENT_SECRET = get_env_str("CTRADER_CLIENT_SECRET", "CLIENT_SECRET", "CTRADER_SECRET", "APP_CLIENT_SECRET")
+ACCESS_TOKEN = get_env_str("CTRADER_ACCESS_TOKEN", "ACCESS_TOKEN", "CTRADER_TOKEN", "TOKEN")
+ACCOUNT_ID = get_env_int("CTRADER_ACCOUNT_ID", "ACCOUNT_ID", "CTID_TRADER_ACCOUNT_ID", default=0)
+SYMBOL_ID = get_env_int("SYMBOL_ID", "CTRADER_SYMBOL_ID", default=1287)  # US30 Symbol ID = 1287
 
 client = Client(EndPoints.PROTOBUF_LIVE_HOST, EndPoints.PROTOBUF_PORT, TcpProtocol)
 timeout_call = None
@@ -30,7 +47,7 @@ def on_timeout():
         reactor.stop()
 
 def on_error(failure):
-    print(f"❌ cTrader API Error: {failure}")
+    print(f"⚠️ cTrader API Error: {failure}")
     stop_reactor_safely()
 
 def get_last_closed_m5_boundary(now_utc):
@@ -55,8 +72,7 @@ def on_trendbars(result):
         high_p = (b.low + b.deltaHigh) / scale
         ts = datetime.datetime.fromtimestamp(b.utcTimestampInMinutes * 60, tz=datetime.timezone.utc)
 
-        # CRITICAL FIX: Drop any currently forming (unclosed) M5 candle.
-        # An M5 bar opening at `ts` only closes at `ts + 5 minutes`.
+        # Drop any currently forming (unclosed) M5 candle
         if ts + datetime.timedelta(minutes=5) > last_closed_boundary:
             continue
 
@@ -82,7 +98,6 @@ def on_trendbars(result):
     )
 
     df.to_csv("data_m5.csv", index=False)
-    # Keep legacy copies in sync in case external scripts reference them
     df.to_csv("data_30m.csv", index=False)
     df.to_csv("data_4h.csv", index=False)
 
@@ -97,7 +112,6 @@ def on_account_auth(result):
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     last_closed_boundary = get_last_closed_m5_boundary(now_utc)
 
-    # Fetch 14 days of closed M5 bars (~2,800 bars) up to the last closed 5-minute boundary
     from_ts = int((last_closed_boundary - datetime.timedelta(days=14)).timestamp() * 1000)
     to_ts = int(last_closed_boundary.timestamp() * 1000)
 
@@ -129,11 +143,19 @@ def connected(client_instance):
     d.addErrback(on_error)
 
 if __name__ == "__main__":
-    if not all([CLIENT_ID, CLIENT_SECRET, ACCESS_TOKEN, ACCOUNT_ID]):
-        print("❌ Missing cTrader credentials in environment variables.")
-        sys.exit(1)
+    missing = [
+        name for name, val in [
+            ("CTRADER_CLIENT_ID", CLIENT_ID),
+            ("CTRADER_CLIENT_SECRET", CLIENT_SECRET),
+            ("CTRADER_ACCESS_TOKEN", ACCESS_TOKEN),
+            ("CTRADER_ACCOUNT_ID / ACCOUNT_ID", ACCOUNT_ID),
+        ] if not val
+    ]
+    if missing:
+        print(f"⚠️ Notice: Missing cTrader env var(s): {', '.join(missing)}")
+        print("⚠️ Proceeding with existing data_m5.csv / Supabase m5_bars so train & predict still run.")
+        sys.exit(0)
 
-    # 45-second watchdog prevents hanging GitHub Actions jobs if cTrader socket stalls
     timeout_call = reactor.callLater(45, on_timeout)
     client.setConnectedCallback(connected)
     client.startService()
