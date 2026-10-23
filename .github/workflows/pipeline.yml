@@ -1,84 +1,79 @@
-name: US30 Quantum Live Engine
+name: US30 Quantum Dual Engine (30M & 4H)
 
 on:
   schedule:
-    - cron: '*/15 * * * *'   # Runs every 15 minutes
-  workflow_dispatch:         # Triggered by Dashboard "Force Engine Run" button
+    # Runs every 15 minutes, 24/5 (Monday through Friday)
+    - cron: '*/15 * * * 1-5'
+  workflow_dispatch:
     inputs:
-      force_train:
-        description: 'Force AI model retraining?'
+      force_retrain:
+        description: 'Force retrain AI models even if already trained today?'
         required: false
         default: 'false'
 
-permissions:
-  contents: write
+# Prevent overlapping runs if a manual Force Run is clicked right as a 15m cron starts
+concurrency:
+  group: us30-quantum-pipeline
+  cancel-in-progress: false
 
 jobs:
-  run-pipeline:
+  run-engine:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     env:
-      PYTHONPATH: .
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
       CTRADER_CLIENT_ID: ${{ secrets.CTRADER_CLIENT_ID }}
       CTRADER_CLIENT_SECRET: ${{ secrets.CTRADER_CLIENT_SECRET }}
       CTRADER_ACCESS_TOKEN: ${{ secrets.CTRADER_ACCESS_TOKEN }}
-      ACCOUNT_ID: "25145646"
-      SYMBOL_ID: "1287"
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      CTRADER_ACCOUNT_ID: ${{ secrets.CTRADER_ACCOUNT_ID }}
+      ACCOUNT_ID: ${{ secrets.ACCOUNT_ID }}
+      SYMBOL_ID: ${{ secrets.SYMBOL_ID }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
     steps:
-      - name: Checkout Repository
+      - name: 📥 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: 🐍 Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
           cache: 'pip'
 
-      - name: Install Dependencies
-        run: pip install -r requirements.txt
+      - name: 📦 Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install pandas numpy scikit-learn joblib "psycopg[binary]" ctrader-open-api twisted service_identity pyOpenSSL
+          fi
 
-      # Get current UTC date & hour so the cache key properly saves today's trained models
-      - name: Get Current UTC Date
-        id: date
-        run: echo "today=$(date -u +%Y-%m-%d)" >> $GITHUB_OUTPUT
+      - name: 🕒 Get Current UTC Date for Daily Model Cache
+        id: get-date
+        run: echo "DATE_UTC=$(date -u +'%Y-%m-%d')" >> $GITHUB_OUTPUT
 
-      # Cache the trained .pkl models across runs so we only train ONCE per day
-      - name: Restore Today's Trained AI Models from Cache
+      - name: 💾 Restore Daily AI Models (30M & 4H)
         id: model-cache
         uses: actions/cache@v4
         with:
           path: |
             model_30m.pkl
             model_4h.pkl
-            data_m5.csv
-          key: ai-models-${{ runner.os }}-${{ steps.date.outputs.today }}-${{ github.run_id }}
-          restore-keys: |
-            ai-models-${{ runner.os }}-${{ steps.date.outputs.today }}-
-            ai-models-${{ runner.os }}-
+          # Key changes once per UTC day -> trains once per day, reuses cache on all other 15m runs!
+          key: us30-models-9feat-${{ steps.get-date.outputs.DATE_UTC }}
 
-      - name: 1. Fetch Live Market Data (cTrader)
-        run: python src/data.py
+      - name: 📡 Step 1 - Fetch Latest Closed M5 Bars (data.py)
+        run: python data.py
 
-      - name: 2. Daily AI Model Retraining (Once Per Day Only)
+      - name: 🧠 Step 2 - Train Models Once Per Day (train.py)
+        if: steps.model-cache.outputs.cache-hit != 'true' || github.event.inputs.force_retrain == 'true'
         run: |
-          CURRENT_HOUR=$(date -u +%H)
-          CURRENT_MIN=$(date -u +%M)
-          # Only train if:
-          # 1) Model files are missing from cache, OR
-          # 2) It is the daily 00:00 - 00:14 UTC training window, OR
-          # 3) You explicitly set force_train to 'true' inside GitHub
-          if [ "${{ github.event.inputs.force_train }}" = "true" ] || [ ! -f "model_4h.pkl" ] || [ ! -f "model_30m.pkl" ] || ( [ "$CURRENT_HOUR" = "00" ] && [ "$CURRENT_MIN" -lt "15" ] ); then
-            echo "🔄 Running Daily AI Model Training on Full 40,000+ Bars..."
-            python src/train.py
-          else
-            echo "⚡ Skipping training! Using cached AI models for fast prediction."
-          fi
+          echo "🔄 First run of UTC day (${{ steps.get-date.outputs.DATE_UTC }}) or forced retrain. Training 30M & 4H models..."
+          python train.py
 
-      - name: 3. Run AI Prediction Engine
-        run: python src/predict.py
+      - name: 🎯 Step 3 - Run 30M & 4H Predictions (predict.py)
+        run: python predict.py
 
-      - name: 4. Run Grid State Validator
-        run: python src/validator.py
+      - name: ✅ Step 4 - Validate Active Signals Against TP (validator.py)
+        run: python validator.py
