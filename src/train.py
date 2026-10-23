@@ -13,12 +13,23 @@ HORIZONS = {
     "4h":  48   # 48 x 5-min bars = 4 Hours
 }
 
-FEATURES = ["ema_diff", "rsi", "atr", "ret_short", "ret_long", "vol_ratio"]
+# Upgraded 9-Feature Vector (includes Price-to-EMA Stretch & Cyclical Session Time)
+FEATURES = [
+    "ema_diff",
+    "ema_stretch",
+    "rsi",
+    "atr",
+    "ret_short",
+    "ret_long",
+    "vol_ratio",
+    "hour_sin",
+    "hour_cos"
+]
 
 def parse_mixed_timestamps(series):
     """
     Safely parses mixed timestamp formats (with/without microseconds, Z, or offsets)
-    so that zero October rows get turned into NaT and dropped.
+    so that zero rows get turned into NaT and dropped.
     """
     try:
         return pd.to_datetime(series, format="ISO8601", utc=True, errors="coerce")
@@ -98,7 +109,7 @@ def sync_and_load_all_m5_bars():
         except Exception as e:
             print(f"Note on local data_m5.csv sync check: {e}")
 
-    # 3. Clean, deduplicate by timestamp, and sort chronologically from April to Oct 22+
+    # 3. Clean, deduplicate by timestamp, and sort chronologically
     for col in ["open", "high", "low", "close", "volume"]:
         db_df[col] = pd.to_numeric(db_df[col], errors="coerce")
 
@@ -109,7 +120,7 @@ def sync_and_load_all_m5_bars():
         .reset_index(drop=True)
     )
 
-    # 4. Overwrite local data_m5.csv with the FULL 40,148+ rows so predict.py & backtest use all data
+    # 4. Overwrite local data_m5.csv with the FULL dataset so predict.py & backtest use all data
     db_df.to_csv("data_m5.csv", index=False)
 
     print("=" * 70)
@@ -124,7 +135,7 @@ def sync_and_load_all_m5_bars():
 
 def build_features(df, tf_name="30m"):
     df = df.copy()
-    # Scale indicator periods to match the timeframe (30m vs 4h)
+    # Scale indicator lookbacks to match the timeframe horizon
     scale = 1 if tf_name == "30m" else 8
 
     df["ema_fast"] = df["close"].ewm(span=20 * scale, adjust=False).mean()
@@ -133,22 +144,33 @@ def build_features(df, tf_name="30m"):
 
     # Timeframe-specific ATR
     high_low = df["high"] - df["low"]
-    high_close = (df["high"] - df["close"].shift()).abs()
-    low_close = (df["low"] - df["close"].shift()).abs()
+    high_close = (df["high"] - df["close"].shift(1)).abs()
+    low_close = (df["low"] - df["close"].shift(1)).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df["atr"] = tr.rolling(14 * scale).mean()
+    df["atr"] = tr.ewm(alpha=1.0 / (14 * scale), adjust=False).mean()
 
-    # Timeframe-specific RSI (True 30m RSI vs True 4h RSI)
-    delta = df["close"].diff(scale)
-    gain = delta.clip(lower=0).rolling(14 * scale).mean()
-    loss = -delta.clip(upper=0).rolling(14 * scale).mean()
-    rs = gain / (loss + 1e-9)
-    df["rsi"] = 100 - (100 / (1 + rs))
+    # Price-to-EMA Stretch (Normalized by ATR so the AI spots rubber-band overextensions)
+    df["ema_stretch"] = (df["close"] - df["ema_fast"]) / (df["atr"] + 1e-5)
+
+    # True Wilder's RSI using non-overlapping 1-bar changes smoothed over the scaled period
+    delta = df["close"].diff(1)
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1.0 / (14 * scale), min_periods=14 * scale, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0 / (14 * scale), min_periods=14 * scale, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-9)
+    df["rsi"] = 100.0 - (100.0 / (1.0 + rs))
 
     # Timeframe-specific Momentum & Volume
     df["ret_short"] = df["close"].pct_change(3 * scale)
     df["ret_long"] = df["close"].pct_change(12 * scale)
     df["vol_ratio"] = df["volume"] / (df["volume"].rolling(20 * scale).mean() + 1e-5)
+
+    # Cyclical UTC Time-of-Day Features (distinguishes Asian session from 13:30 UTC NY Open)
+    ts_utc = parse_mixed_timestamps(df["timestamp"])
+    fractional_hour = ts_utc.dt.hour + (ts_utc.dt.minute / 60.0)
+    df["hour_sin"] = np.sin(2.0 * np.pi * fractional_hour / 24.0)
+    df["hour_cos"] = np.cos(2.0 * np.pi * fractional_hour / 24.0)
 
     return df
 
@@ -160,14 +182,28 @@ def train_horizon(raw_df, tf_name, horizon_bars):
     future_high = df["high"].shift(-1).rolling(window=indexer).max()
     future_low = df["low"].shift(-1).rolling(window=indexer).min()
 
-    df["target_up"] = (future_high - df["close"]).clip(lower=1.0)
-    df["target_down"] = (df["close"] - future_low).clip(lower=1.0)
+    # CRITICAL ALIGNMENT FIX: Train targets relative to ema_fast (matching predict.py's anchor_ema)
+    df["target_up"] = (future_high - df["ema_fast"]).clip(lower=1.0)
+    df["target_down"] = (df["ema_fast"] - future_low).clip(lower=1.0)
 
     df_clean = df.dropna(subset=FEATURES + ["target_up", "target_down"]).reset_index(drop=True)
     X = df_clean[FEATURES]
 
-    model_up = RandomForestRegressor(n_estimators=100, max_depth=8, random_state=42, n_jobs=-1)
-    model_down = RandomForestRegressor(n_estimators=100, max_depth=8, random_state=42, n_jobs=-1)
+    # Stabilized Random Forest: min_samples_leaf=25 prevents single freak news wicks from warping EQ
+    model_up = RandomForestRegressor(
+        n_estimators=150,
+        max_depth=10,
+        min_samples_leaf=25,
+        random_state=42,
+        n_jobs=-1
+    )
+    model_down = RandomForestRegressor(
+        n_estimators=150,
+        max_depth=10,
+        min_samples_leaf=25,
+        random_state=42,
+        n_jobs=-1
+    )
 
     model_up.fit(X, df_clean["target_up"])
     model_down.fit(X, df_clean["target_down"])
