@@ -17,7 +17,7 @@ jobs:
   run-pipeline:
     runs-on: ubuntu-latest
     env:
-      PYTHONPATH: .
+      PYTHONPATH: .:./src
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       CTRADER_CLIENT_ID: ${{ secrets.CTRADER_CLIENT_ID }}
       CTRADER_CLIENT_SECRET: ${{ secrets.CTRADER_CLIENT_SECRET }}
@@ -52,7 +52,7 @@ jobs:
             model_30m.pkl
             model_4h.pkl
             data_m5.csv
-          key: ai-models-v3-${{ runner.os }}-${{ steps.date.outputs.today }}-${{ github.event.inputs.force_train || 'auto' }}
+          key: ai-models-v3-${{ runner.os }}-${{ steps.date.outputs.today }}-${{ github.run_id }}
           restore-keys: |
             ai-models-v3-${{ runner.os }}-${{ steps.date.outputs.today }}-
             ai-models-v3-${{ runner.os }}-
