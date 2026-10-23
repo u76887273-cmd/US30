@@ -13,13 +13,37 @@ HORIZONS = {
     "4h":  48   # 48 x 5-min bars = 4 Hours
 }
 
-FEATURES = ["ema_diff", "ema_stretch", "rsi", "atr", "ret_short", "ret_long", "vol_ratio"]
+FEATURES = [
+    "ema_diff",
+    "ema_stretch",
+    "rsi",
+    "atr",
+    "ret_short",
+    "ret_long",
+    "vol_ratio",
+    "hour_sin",
+    "hour_cos",
+]
 
 def parse_mixed_timestamps(series):
     try:
         return pd.to_datetime(series, format="ISO8601", utc=True, errors="coerce")
     except Exception:
         return pd.to_datetime(series, format="mixed", utc=True, errors="coerce")
+
+def ensure_unique_timestamp_constraint(conn):
+    """Deduplicates m5_bars in Supabase and ensures a UNIQUE index on timestamp exists."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                DELETE FROM {TABLE_NAME} a USING {TABLE_NAME} b
+                WHERE a.ctid < b.ctid AND a.timestamp = b.timestamp;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_{TABLE_NAME}_timestamp ON {TABLE_NAME} (timestamp);
+            """)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"Note on index maintenance: {e}")
 
 def sync_and_load_all_m5_bars():
     if not DB_URL:
@@ -30,6 +54,7 @@ def sync_and_load_all_m5_bars():
         return df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
     with psycopg.connect(DB_URL) as conn:
+        ensure_unique_timestamp_constraint(conn)
         with conn.cursor() as cur:
             cur.execute(f"SELECT timestamp, open, high, low, close, volume FROM {TABLE_NAME};")
             rows = cur.fetchall()
@@ -108,14 +133,13 @@ def sync_and_load_all_m5_bars():
 
 def build_features(df, tf_name="30m"):
     df = df.copy()
-    # 30m scale = 2 (10-min fast / 30-min structure), 4h scale = 8 (4-hour structure)
     scale = 2 if tf_name == "30m" else 8
 
     df["ema_fast"] = df["close"].ewm(span=12 * scale, adjust=False).mean()
     df["ema_slow"] = df["close"].ewm(span=36 * scale, adjust=False).mean()
     df["ema_diff"] = df["ema_fast"] - df["ema_slow"]
 
-    # Timeframe-specific ATR
+    # Timeframe-specific Wilder's ATR
     high_low = df["high"] - df["low"]
     high_close = (df["high"] - df["close"].shift()).abs()
     low_close = (df["low"] - df["close"].shift()).abs()
@@ -125,7 +149,7 @@ def build_features(df, tf_name="30m"):
     # Rubber-band stretch of live price from structural EMA (normalized by ATR)
     df["ema_stretch"] = (df["close"] - df["ema_fast"]) / (df["atr"] + 1e-5)
 
-    # True Wilder's RSI (using non-overlapping 1-bar deltas smoothed over timeframe period)
+    # True Wilder's EWM RSI
     delta = df["close"].diff(1)
     gain = delta.clip(lower=0).ewm(alpha=1.0 / (14 * scale), adjust=False).mean()
     loss = (-delta.clip(upper=0)).ewm(alpha=1.0 / (14 * scale), adjust=False).mean()
@@ -138,6 +162,11 @@ def build_features(df, tf_name="30m"):
     vol_ma = df["volume"].rolling(20 * scale, min_periods=1).mean()
     df["vol_ratio"] = df["volume"] / (vol_ma + 1.0)
 
+    # Cyclical UTC Session Time (captures NY Open vs Asian Session volatility)
+    utc_hour = df["timestamp"].dt.hour + (df["timestamp"].dt.minute / 60.0)
+    df["hour_sin"] = np.sin(2.0 * np.pi * utc_hour / 24.0)
+    df["hour_cos"] = np.cos(2.0 * np.pi * utc_hour / 24.0)
+
     return df
 
 def train_horizon(raw_df, tf_name, horizon_bars):
@@ -147,7 +176,7 @@ def train_horizon(raw_df, tf_name, horizon_bars):
     future_high = df["high"].shift(-1).rolling(window=indexer).max()
     future_low = df["low"].shift(-1).rolling(window=indexer).min()
 
-    # Train targets directly from the structural EMA anchor so train.py and predict.py match 100%
+    # Anchored to structural EMA so train.py and predict.py match 100%
     df["target_up"] = (future_high - df["ema_fast"]).clip(lower=1.0)
     df["target_down"] = (df["ema_fast"] - future_low).clip(lower=1.0)
 
@@ -155,10 +184,10 @@ def train_horizon(raw_df, tf_name, horizon_bars):
     X = df_clean[FEATURES]
 
     model_up = RandomForestRegressor(
-        n_estimators=100, max_depth=10, min_samples_leaf=20, random_state=42, n_jobs=-1
+        n_estimators=120, max_depth=10, min_samples_leaf=20, random_state=42, n_jobs=-1
     )
     model_down = RandomForestRegressor(
-        n_estimators=100, max_depth=10, min_samples_leaf=20, random_state=42, n_jobs=-1
+        n_estimators=120, max_depth=10, min_samples_leaf=20, random_state=42, n_jobs=-1
     )
 
     model_up.fit(X, df_clean["target_up"])
