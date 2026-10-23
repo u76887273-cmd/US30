@@ -20,10 +20,12 @@ def get_current_high_low():
     if os.path.exists("latest_quote.json"):
         try:
             with open("latest_quote.json", "r", encoding="utf-8") as f:
-                spot = float(json.load(f).get("current_price") or 0)
-            if spot > 1000:
-                high_p = max(high_p, spot) if high_p else spot
-                low_p = min(low_p, spot) if low_p else spot
+                q = json.load(f)
+            if q.get("status") == "QUOTE_RECEIVED":
+                spot = float(q.get("current_price") or 0)
+                if spot > 1000:
+                    high_p = max(high_p, spot) if high_p else spot
+                    low_p = min(low_p, spot) if low_p else spot
         except Exception:
             pass
 
