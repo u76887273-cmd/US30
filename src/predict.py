@@ -46,7 +46,6 @@ def sync_recent_bars_and_load_warmup(conn, live_spot):
                 local_df["volume"] = pd.to_numeric(local_df.get("volume", 0.0), errors="coerce").fillna(0.0)
                 local_df = local_df.dropna(subset=["timestamp", "open", "high", "low", "close"]).sort_values("timestamp")
 
-                # Ensure last bar reflects live spot quote
                 if live_spot is not None and not local_df.empty:
                     idx = local_df.index[-1]
                     local_df.loc[idx, "close"] = live_spot
@@ -55,7 +54,7 @@ def sync_recent_bars_and_load_warmup(conn, live_spot):
                     if live_spot < float(local_df.loc[idx, "low"]):
                         local_df.loc[idx, "low"] = live_spot
 
-                recent_slice = local_df.tail(500)
+                recent_slice = local_df.tail(250)
                 with conn.cursor() as cur:
                     insert_data = [
                         (
@@ -78,6 +77,7 @@ def sync_recent_bars_and_load_warmup(conn, live_spot):
                     )
                 conn.commit()
         except Exception as e:
+            conn.rollback()
             print(f"Note on live bar sync: {e}")
 
     db_df = pd.DataFrame()
@@ -110,7 +110,6 @@ def sync_recent_bars_and_load_warmup(conn, live_spot):
         .reset_index(drop=True)
     )
 
-    # Guarantee the final warmup row has the exact live spot price
     if live_spot is not None and not combined.empty:
         idx = combined.index[-1]
         combined.loc[idx, "close"] = live_spot
@@ -156,7 +155,6 @@ def predict_for_timeframe(conn, raw_df, tf, live_spot):
     models = joblib.load(model_path)
     latest_row = df_feat.iloc[[-1]]
 
-    # Backward-compatible feature selection in case cached model was trained before ema_stretch was added
     model_features = list(getattr(models["up"], "feature_names_in_", FEATURES))
     X_latest = latest_row[model_features]
 
@@ -167,7 +165,7 @@ def predict_for_timeframe(conn, raw_df, tf, live_spot):
     pred_up = float(models["up"].predict(X_latest)[0])
     pred_down = float(models["down"].predict(X_latest)[0])
 
-    # Anchor projected range to the structural EMA so price can naturally reach 0.60 triggers
+    # Projected range anchored to structural EMA
     proj_high = anchor_ema + pred_up
     proj_low = anchor_ema - pred_down
     total_range = max(proj_high - proj_low, 10.0)
@@ -175,7 +173,7 @@ def predict_for_timeframe(conn, raw_df, tf, live_spot):
     midline_eq = (proj_high + proj_low) / 2.0
     half_range = total_range / 2.0
 
-    # 60% Distance Thresholds (0.60) kept for BOTH 30m and 4h
+    # 60% Distance Thresholds (0.60) for BOTH 30m and 4h
     sell_trigger = midline_eq + (half_range * 0.60)
     buy_trigger = midline_eq - (half_range * 0.60)
 
@@ -202,11 +200,10 @@ def predict_for_timeframe(conn, raw_df, tf, live_spot):
     else:
         entry_zone = f"B: {buy_low:.0f} - {buy_high:.0f} | S: {sell_low:.0f} - {sell_high:.0f}"
 
-    up_ratio = (pred_up / total_range) * 100.0
-    down_ratio = (pred_down / total_range) * 100.0
-    bias_pct = up_ratio if price < midline_eq else down_ratio
+    # True Stretch % from Equilibrium toward Upper/Lower Limit (60.0%+ triggers BUY/SELL)
+    stretch_pct = min((abs(price - midline_eq) / max(half_range, 1.0)) * 100.0, 100.0)
 
-    reason = f"Bias:{bias_pct:.1f}% | RSI:{rsi:.1f} | EQ:{eq_0d:.0f}"
+    reason = f"Bias:{stretch_pct:.1f}% | RSI:{rsi:.1f}"
     run_ts = datetime.datetime.now(datetime.timezone.utc)
 
     init_db_table(conn, table_name)
@@ -217,7 +214,7 @@ def predict_for_timeframe(conn, raw_df, tf, live_spot):
             VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE')
         """, (run_ts, price_0d, signal, reason, entry_zone, price_0d, eq_0d))
     conn.commit()
-    print(f"[{tf.upper()}] {signal} @ {price_0d:.0f} (Live Spot: {price:.2f}) | AnchorEMA:{anchor_ema:.0f} | Buy<={buy_trigger:.0f} Sell>={sell_trigger:.0f} | EQ/TP: {eq_0d:.0f} | {reason}")
+    print(f"[{tf.upper()}] {signal} @ {price_0d:.0f} (Spot: {price:.2f}) | AnchorEMA:{anchor_ema:.0f} | Buy<={buy_trigger:.0f} Sell>={sell_trigger:.0f} | EQ/TP: {eq_0d:.0f} | {reason}")
 
 if __name__ == "__main__":
     live_spot = get_live_spot_quote()
