@@ -40,10 +40,14 @@
 
             <!-- ================= 30-MINUTE (30M) ENGINE ================= -->
             <div class="glass rounded-2xl p-6 shadow-2xl space-y-6">
-                <div class="flex items-center justify-start border-b border-slate-700 pb-4">
+                <div class="flex items-center justify-between border-b border-slate-700 pb-4 gap-2">
                     <span class="px-3 py-1 bg-sky-500/20 border border-sky-500/40 text-sky-400 rounded-lg text-xs font-bold uppercase tracking-wider">
                         30-Minute (30M)
                     </span>
+                    <div class="flex items-center gap-2">
+                        <span id="meta-val-30m" class="text-xs font-mono text-slate-400">RSI: -- | Bias: --</span>
+                        <span id="status-val-30m" class="hidden px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider"></span>
+                    </div>
                 </div>
 
                 <!-- Signal Area -->
@@ -75,10 +79,14 @@
 
             <!-- ================= 4-HOUR (4H) ENGINE ================= -->
             <div class="glass rounded-2xl p-6 shadow-2xl space-y-6">
-                <div class="flex items-center justify-start border-b border-slate-700 pb-4">
+                <div class="flex items-center justify-between border-b border-slate-700 pb-4 gap-2">
                     <span class="px-3 py-1 bg-purple-500/20 border border-purple-500/40 text-purple-300 rounded-lg text-xs font-bold uppercase tracking-wider">
                         4-Hour (4H)
                     </span>
+                    <div class="flex items-center gap-2">
+                        <span id="meta-val-4h" class="text-xs font-mono text-slate-400">RSI: -- | Bias: --</span>
+                        <span id="status-val-4h" class="hidden px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider"></span>
+                    </div>
                 </div>
 
                 <!-- Signal Area -->
@@ -112,7 +120,7 @@
 
         <!-- Buttons Area -->
         <div class="flex flex-col sm:flex-row justify-center gap-4 mt-8">
-            <button onclick="fetchData()" class="px-6 py-3 bg-sky-600 hover:bg-sky-500 text-white rounded-full font-semibold transition-colors shadow-[0_0_15px_rgba(2,132,199,0.5)]">
+            <button id="refresh-btn" onclick="fetchData(true)" class="px-6 py-3 bg-sky-600 hover:bg-sky-500 text-white rounded-full font-semibold transition-colors shadow-[0_0_15px_rgba(2,132,199,0.5)]">
                 Refresh Data
             </button>
 
@@ -129,8 +137,15 @@
 
         const GITHUB_USERNAME = window.location.hostname.includes("github.io") 
             ? window.location.hostname.split(".")[0] 
-            : "u76887273-cmd"; 
-        const GITHUB_REPO = window.location.pathname.split("/")[1] || "US30-Quantum-"; 
+            : "u76887273-cmd";
+
+        // Safely detect GitHub repo name without accidentally grabbing "index.html"
+        const pathSegment = window.location.pathname.split("/")[1] || "";
+        const GITHUB_REPO = (pathSegment && !pathSegment.endsWith(".html"))
+            ? pathSegment
+            : "US30-Quantum-";
+
+        let latestKnownRunIso = null;
 
         // Format any US30 price number in a string to integer (0 decimals)
         function formatPricesToInteger(str) {
@@ -140,29 +155,53 @@
 
         function renderTimeframeCard(tf, row) {
             const sigEl = document.getElementById(`signal-val-${tf}`);
-            sigEl.innerText = row.signal || "WAIT";
-            if (row.signal === "BUY") {
+            const signal = (row.signal || "WAIT").toUpperCase();
+            sigEl.innerText = signal;
+
+            if (signal === "BUY") {
                 sigEl.className = "text-5xl font-extrabold tracking-tight text-emerald-400 glow-green";
-            } else if (row.signal === "SELL") {
+            } else if (signal === "SELL") {
                 sigEl.className = "text-5xl font-extrabold tracking-tight text-rose-400 glow-red";
             } else {
                 sigEl.className = "text-5xl font-extrabold tracking-tight text-slate-300";
             }
 
+            // Parse Bias, RSI, and EQ from reason string ("Bias:54.2% | RSI:48.1 | EQ:42150")
             const rawReason = row.reason || "";
             const eqMatch = rawReason.match(/EQ:\s*([0-9.]+)/i);
-            const eqValue = eqMatch ? Number(eqMatch[1]) : (row.take_profit ? Number(row.take_profit) : null);
-            const eqFormatted = eqValue !== null ? Math.round(eqValue).toString() : "--";
+            const rsiMatch = rawReason.match(/RSI:\s*([0-9.]+)/i);
+            const biasMatch = rawReason.match(/Bias:\s*([0-9.]+%?)/i);
+
+            const rsiText = rsiMatch ? Number(rsiMatch[1]).toFixed(1) : "--";
+            const biasText = biasMatch ? (biasMatch[1].endsWith("%") ? biasMatch[1] : `${biasMatch[1]}%`) : "--";
+            document.getElementById(`meta-val-${tf}`).innerText = `RSI: ${rsiText} | Bias: ${biasText}`;
+
+            // Render HIT_TP or ACTIVE badge for BUY/SELL signals
+            const statusEl = document.getElementById(`status-val-${tf}`);
+            if (row.status === "HIT_TP") {
+                statusEl.innerText = "HIT TP ✓";
+                statusEl.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-emerald-500/20 border border-emerald-500/40 text-emerald-300";
+            } else if (signal === "BUY" || signal === "SELL") {
+                statusEl.innerText = "ACTIVE";
+                statusEl.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-amber-500/20 border border-amber-500/40 text-amber-300";
+            } else {
+                statusEl.className = "hidden";
+            }
+
+            const eqValue = (row.take_profit !== null && row.take_profit !== undefined)
+                ? Number(row.take_profit)
+                : (eqMatch ? Number(eqMatch[1]) : null);
+            const eqFormatted = (eqValue !== null && !Number.isNaN(eqValue)) ? Math.round(eqValue).toString() : "--";
 
             const zoneText = formatPricesToInteger(row.entry_zone || "-");
             if (zoneText.includes("|")) {
                 const parts = zoneText.split("|");
                 document.getElementById(`buy-zone-${tf}`).innerText = parts[0].replace("B:", "").trim();
                 document.getElementById(`sell-zone-${tf}`).innerText = parts[1].replace("S:", "").trim();
-            } else if (row.signal === "BUY") {
+            } else if (signal === "BUY") {
                 document.getElementById(`buy-zone-${tf}`).innerText = zoneText;
                 document.getElementById(`sell-zone-${tf}`).innerText = "WAITING";
-            } else if (row.signal === "SELL") {
+            } else if (signal === "SELL") {
                 document.getElementById(`buy-zone-${tf}`).innerText = "WAITING";
                 document.getElementById(`sell-zone-${tf}`).innerText = zoneText;
             } else {
@@ -189,7 +228,12 @@
             return await response.json();
         }
 
-        async function fetchData() {
+        async function fetchData(isManual = false) {
+            const refreshBtn = document.getElementById("refresh-btn");
+            if (isManual && refreshBtn) {
+                refreshBtn.innerText = "Refreshing...";
+            }
+
             try {
                 const [res30m, res4h] = await Promise.allSettled([
                     fetchTableLatest("supreme_grid_log"),
@@ -199,25 +243,31 @@
                 const data30m = res30m.status === "fulfilled" ? res30m.value : [];
                 const data4h = res4h.status === "fulfilled" ? res4h.value : [];
 
-                if (data30m && data30m.length > 0) {
-                    const row30 = data30m[0];
-                    const runTime = new Date(row30.created_at || row30.timestamp);
-                    document.getElementById('time-val').innerText = runTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                    document.getElementById('price-val').innerText = Math.round(Number(row30.price)).toString();
-                    renderTimeframeCard("30m", row30);
+                const row30 = data30m && data30m.length > 0 ? data30m[0] : null;
+                const row4h = data4h && data4h.length > 0 ? data4h[0] : null;
+
+                // Pick whichever row has the newest timestamp for the top header bar
+                const headerRow = row30 || row4h;
+                if (headerRow) {
+                    const rawTs = headerRow.created_at || headerRow.timestamp;
+                    latestKnownRunIso = rawTs;
+                    const runTime = new Date(rawTs);
+                    document.getElementById('time-val').innerText = runTime.toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: false
+                    });
+                    document.getElementById('price-val').innerText = Math.round(Number(headerRow.price)).toString();
                 }
 
-                if (data4h && data4h.length > 0) {
-                    const row4h = data4h[0];
-                    if (!data30m || data30m.length === 0) {
-                        const runTime = new Date(row4h.created_at || row4h.timestamp);
-                        document.getElementById('time-val').innerText = runTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                        document.getElementById('price-val').innerText = Math.round(Number(row4h.price)).toString();
-                    }
-                    renderTimeframeCard("4h", row4h);
-                }
+                if (row30) renderTimeframeCard("30m", row30);
+                if (row4h) renderTimeframeCard("4h", row4h);
             } catch (error) {
                 console.error("Supabase Error:", error);
+            } finally {
+                if (isManual && refreshBtn) {
+                    setTimeout(() => { refreshBtn.innerText = "Refresh Data"; }, 400);
+                }
             }
         }
 
@@ -227,15 +277,18 @@
             if (!token) {
                 token = prompt("🔒 FIRST TIME SETUP:\n\nPlease paste your GitHub Token (ghp_... or github_pat_...) here:");
                 if (!token) return; 
-                localStorage.setItem("github_pat_us30", token.trim()); 
+                token = token.trim();
+                localStorage.setItem("github_pat_us30", token); 
             }
 
             const btn = document.getElementById("force-btn");
             const originalText = btn.innerHTML;
+            btn.disabled = true;
             btn.innerHTML = "<span>⏳ Triggering...</span>";
 
             try {
-                const workflows = ["main.yml", "pipeline.yml", "run-pipeline.yml"];
+                // Checks run-pipeline.yml first (matching our new workflow), then fallbacks
+                const workflows = ["run-pipeline.yml", "main.yml", "pipeline.yml"];
                 let response = null;
 
                 for (const wf of workflows) {
@@ -252,27 +305,46 @@
                 }
 
                 if (response && (response.ok || response.status === 204)) {
-                    alert("✅ US30 Dual Engine (30M & 4H) has been force-started!\n\nIt will finish in ~40 seconds and update automatically.");
+                    const prevRunIso = latestKnownRunIso;
+                    let remaining = 35;
+
+                    // Live countdown & fast-polling until the new run finishes and writes to Supabase
+                    const pollTimer = setInterval(async () => {
+                        remaining -= 5;
+                        btn.innerHTML = `<span>⏳ Running Engine (${Math.max(remaining, 0)}s)...</span>`;
+                        await fetchData(false);
+
+                        if ((latestKnownRunIso && latestKnownRunIso !== prevRunIso) || remaining <= 0) {
+                            clearInterval(pollTimer);
+                            btn.innerHTML = "<span>✅ Updated!</span>";
+                            btn.disabled = false;
+                            setTimeout(() => { btn.innerHTML = originalText; }, 2500);
+                        }
+                    }, 5000);
                 } else {
-                    const errData = response ? await response.json() : { message: "Workflow not found" };
-                    if (response && (response.status === 401 || response.status === 404 || response.status === 403)) {
+                    const errData = response ? await response.json().catch(() => ({})) : { message: "Workflow not found" };
+                    if (response && (response.status === 401 || response.status === 403)) {
                         localStorage.removeItem("github_pat");
                         localStorage.removeItem("github_pat_us30");
-                        alert(`❌ Token needs permission for ${GITHUB_REPO} (or is expired). I cleared it from memory so you can paste a new one.`);
+                        alert(`❌ Token unauthorized or expired for ${GITHUB_USERNAME}/${GITHUB_REPO}. Cleared from memory—click again to enter a new token.`);
+                    } else if (response && response.status === 404) {
+                        alert(`❌ Workflow file or repository (${GITHUB_USERNAME}/${GITHUB_REPO}) not found (HTTP 404). Make sure your token has 'repo' and 'workflow' permissions.`);
                     } else {
-                        alert("Error: " + errData.message);
+                        alert("Error: " + (errData.message || "Failed to trigger workflow."));
                     }
+                    btn.innerHTML = originalText;
+                    btn.disabled = false;
                 }
             } catch (error) {
                 console.error(error);
                 alert("Network error. Could not reach GitHub API.");
-            } finally {
                 btn.innerHTML = originalText;
+                btn.disabled = false;
             }
         }
 
         fetchData();
-        setInterval(fetchData, 30000);
+        setInterval(() => fetchData(false), 30000);
     </script>
 </body>
 </html>
