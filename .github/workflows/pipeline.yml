@@ -1,85 +1,78 @@
-name: US30 Quantum Dual Engine (30M & 4H)
+name: US30 Quantum Live Engine
 
 on:
   schedule:
-    - cron: '*/15 * * * 1-5'
-  workflow_dispatch:
+    - cron: '*/15 * * * *'   # Runs every 15 minutes
+  workflow_dispatch:         # Triggered by Dashboard "Force Engine Run" button
     inputs:
-      force_retrain:
-        description: 'Force retrain AI models even if already trained today?'
+      force_train:
+        description: 'Force AI model retraining?'
         required: false
         default: 'false'
-
-concurrency:
-  group: us30-quantum-pipeline
-  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
-  run-engine:
+  run-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
     env:
-      CTRADER_CLIENT_ID: ${{ secrets.CTRADER_CLIENT_ID || secrets.CLIENT_ID || secrets.CTRADER_ID || vars.CTRADER_CLIENT_ID || vars.CLIENT_ID }}
-      CTRADER_CLIENT_SECRET: ${{ secrets.CTRADER_CLIENT_SECRET || secrets.CLIENT_SECRET || secrets.CTRADER_SECRET || vars.CTRADER_CLIENT_SECRET || vars.CLIENT_SECRET }}
-      CTRADER_ACCESS_TOKEN: ${{ secrets.CTRADER_ACCESS_TOKEN || secrets.ACCESS_TOKEN || secrets.CTRADER_TOKEN || vars.CTRADER_ACCESS_TOKEN || vars.ACCESS_TOKEN }}
-      CTRADER_ACCOUNT_ID: ${{ secrets.CTRADER_ACCOUNT_ID || secrets.ACCOUNT_ID || secrets.CTID_TRADER_ACCOUNT_ID || vars.CTRADER_ACCOUNT_ID || vars.ACCOUNT_ID }}
-      ACCOUNT_ID: ${{ secrets.ACCOUNT_ID || secrets.CTRADER_ACCOUNT_ID || secrets.CTID_TRADER_ACCOUNT_ID || vars.ACCOUNT_ID || vars.CTRADER_ACCOUNT_ID }}
-      SYMBOL_ID: ${{ secrets.SYMBOL_ID || secrets.CTRADER_SYMBOL_ID || vars.SYMBOL_ID || '1287' }}
-      DATABASE_URL: ${{ secrets.DATABASE_URL || secrets.SUPABASE_DB_URL || secrets.DB_URL || secrets.POSTGRES_URL || vars.DATABASE_URL }}
+      PYTHONPATH: .
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      CTRADER_CLIENT_ID: ${{ secrets.CTRADER_CLIENT_ID }}
+      CTRADER_CLIENT_SECRET: ${{ secrets.CTRADER_CLIENT_SECRET }}
+      CTRADER_ACCESS_TOKEN: ${{ secrets.CTRADER_ACCESS_TOKEN }}
+      ACCOUNT_ID: "25145646"
+      SYMBOL_ID: "1287"
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
-      - name: 📥 Checkout Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🔍 Normalize Script Filenames & Locations
-        run: |
-          for script in data.py train.py predict.py validator.py requirements.txt; do
-            found=$(find . -maxdepth 3 -iname "$script" | head -n 1)
-            if [ -n "$found" ] && [ "$found" != "./$script" ]; then
-              cp "$found" "./$script"
-            fi
-          done
-
-      - name: 🐍 Set up Python 3.11 (No Cache Egress)
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
+          cache: 'pip'
 
-      - name: 📦 Install Dependencies
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Get Current UTC Date
+        id: date
+        run: echo "today=$(date -u +%Y-%m-%d)" >> $GITHUB_OUTPUT
+
+      - name: Restore Today's Trained AI Models from Cache
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            model_30m.pkl
+            model_4h.pkl
+            data_m5.csv
+          key: ai-models-v2-${{ runner.os }}-${{ steps.date.outputs.today }}-${{ github.run_id }}
+          restore-keys: |
+            ai-models-v2-${{ runner.os }}-${{ steps.date.outputs.today }}-
+            ai-models-v2-${{ runner.os }}-
+
+      - name: 1. Fetch Live Market Data & Spot Price (cTrader)
+        run: python src/data.py
+
+      - name: 2. Daily AI Model Retraining (Once Per Day Only)
         run: |
-          pip install --no-cache-dir -r requirements.txt
-
-      - name: 📡 Step 1 - Fetch Latest M5 Bars (data.py)
-        run: python data.py
-
-      - name: 🧠 Step 2 - Train Models Once Per Day (train.py)
-        run: |
-          TODAY_UTC=$(date -u +'%Y-%m-%d')
-          LAST_TRAINED=""
-          if [ -f .last_trained_date ]; then
-            LAST_TRAINED=$(cat .last_trained_date | tr -d '[:space:]')
-          fi
-
-          if [ "$LAST_TRAINED" != "$TODAY_UTC" ] || [ ! -f model_30m.pkl ] || [ ! -f model_4h.pkl ] || [ "${{ github.event.inputs.force_retrain }}" = "true" ]; then
-            echo "🔄 Training models for UTC date $TODAY_UTC..."
-            python train.py
-            echo "$TODAY_UTC" > .last_trained_date
-
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add -f model_30m.pkl model_4h.pkl .last_trained_date
-            git commit -m "chore: daily model update ($TODAY_UTC) [skip ci]" || true
-            git push origin HEAD:main || true
+          CURRENT_HOUR=$(date -u +%H)
+          CURRENT_MIN=$(date -u +%M)
+          if [ "${{ github.event.inputs.force_train }}" = "true" ] || [ ! -f "model_4h.pkl" ] || [ ! -f "model_30m.pkl" ] || ( [ "$CURRENT_HOUR" = "00" ] && [ "$CURRENT_MIN" -lt "15" ] ); then
+            echo "🔄 Running Daily AI Model Training on Full 40,000+ Bars..."
+            python src/train.py
           else
-            echo "✅ Models already trained today ($TODAY_UTC). Skipping train.py!"
+            echo "⚡ Skipping training! Using cached AI models for fast prediction."
           fi
 
-      - name: 🎯 Step 3 - Run 30M & 4H Predictions (predict.py)
-        run: python predict.py
+      - name: 3. Run AI Prediction Engine
+        run: python src/predict.py
 
-      - name: ✅ Step 4 - Validate Active Signals Against TP (validator.py)
-        run: python validator.py
+      - name: 4. Run Grid State Validator
+        run: python src/validator.py
