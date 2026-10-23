@@ -3,7 +3,7 @@ name: US30 Quantum Live Engine
 on:
   schedule:
     - cron: '*/15 * * * *'   # Runs every 15 minutes
-  workflow_dispatch:         # Triggered by Dashboard "Force Engine Run" button
+  workflow_dispatch:
     inputs:
       force_train:
         description: 'Force AI model retraining?'
@@ -52,10 +52,10 @@ jobs:
             model_30m.pkl
             model_4h.pkl
             data_m5.csv
-          key: ai-models-v2-${{ runner.os }}-${{ steps.date.outputs.today }}-${{ github.run_id }}
+          key: ai-models-v3-${{ runner.os }}-${{ steps.date.outputs.today }}-${{ github.event.inputs.force_train || 'auto' }}
           restore-keys: |
-            ai-models-v2-${{ runner.os }}-${{ steps.date.outputs.today }}-
-            ai-models-v2-${{ runner.os }}-
+            ai-models-v3-${{ runner.os }}-${{ steps.date.outputs.today }}-
+            ai-models-v3-${{ runner.os }}-
 
       - name: 1. Fetch Live Market Data & Spot Price (cTrader)
         run: python src/data.py
