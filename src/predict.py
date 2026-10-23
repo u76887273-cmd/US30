@@ -136,16 +136,29 @@ def predict_for_timeframe(conn, raw_df, tf):
     midline_eq = (proj_high + proj_low) / 2.0
     half_range = total_range / 2.0
 
-    # 60% Distance Thresholds from Equilibrium (EQ) to Upper/Lower Limits
-    sell_trigger = midline_eq + (half_range * 0.60)
-    buy_trigger = midline_eq - (half_range * 0.60)
+    price_0d = round(price, 0)
+    eq_0d = round(midline_eq, 0)
 
-    if price <= buy_trigger:
-        signal = "BUY"
-    elif price >= sell_trigger:
-        signal = "SELL"
+    # 30m: No 0.60 condition (direct comparison against Equilibrium)
+    # 4h: Keep 60% Distance Threshold from Equilibrium (EQ) to Upper/Lower Limits
+    if tf == "30m":
+        sell_trigger = eq_0d
+        buy_trigger = eq_0d
+        if price_0d < eq_0d:
+            signal = "BUY"
+        elif price_0d > eq_0d:
+            signal = "SELL"
+        else:
+            signal = "WAIT"
     else:
-        signal = "WAIT"
+        sell_trigger = midline_eq + (half_range * 0.60)
+        buy_trigger = midline_eq - (half_range * 0.60)
+        if price <= buy_trigger:
+            signal = "BUY"
+        elif price >= sell_trigger:
+            signal = "SELL"
+        else:
+            signal = "WAIT"
 
     # Dynamic 20% Entry Limit Zones (20% of the distance from EQ to Upper/Lower Limit)
     zone_height = max(half_range * 0.20, 5.0)
@@ -153,9 +166,6 @@ def predict_for_timeframe(conn, raw_df, tf):
     buy_high = round(proj_low + zone_height, 0)
     sell_low = round(proj_high - zone_height, 0)
     sell_high = round(proj_high, 0)
-
-    price_0d = round(price, 0)
-    eq_0d = round(midline_eq, 0)
 
     if signal == "BUY":
         entry_zone = f"B: {buy_low:.0f} - {buy_high:.0f} | S: WAITING"
