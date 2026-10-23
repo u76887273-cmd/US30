@@ -3,7 +3,7 @@ import datetime
 import joblib
 import psycopg
 import pandas as pd
-from train import build_features, FEATURES
+from train import build_features, train_horizon, FEATURES, HORIZONS
 
 DB_URL = os.environ.get("DATABASE_URL")
 RAW_BARS_TABLE = "m5_bars"
@@ -125,16 +125,25 @@ def predict_for_timeframe(conn, raw_df, tf):
     table_name = TABLES[tf]
 
     if not os.path.exists(model_path):
-        print(f"[{tf.upper()}] Model file {model_path} missing.")
-        return
+        print(f"[{tf.upper()}] Model file {model_path} missing. Training now...")
+        train_horizon(raw_df, tf, HORIZONS[tf])
 
-    # Build timeframe-specific features so 30m and 4h each have their own true RSI & EMAs
+    models = joblib.load(model_path)
+
+    # Self-healing check: if cached model was trained on old 6 features, retrain on new 9 features
+    expected_features = len(FEATURES)
+    actual_features = getattr(models["up"], "n_features_in_", expected_features)
+    if actual_features != expected_features:
+        print(f"[{tf.upper()}] Cached model has {actual_features} features (expected {expected_features}). Retraining...")
+        train_horizon(raw_df, tf, HORIZONS[tf])
+        models = joblib.load(model_path)
+
+    # Build timeframe-specific features so 30m and 4h each have their own true Wilder's RSI & EMAs
     df_feat = build_features(raw_df, tf).dropna(subset=FEATURES).reset_index(drop=True)
     if df_feat.empty:
         print(f"[{tf.upper()}] Not enough warmup bars to compute features (rows={len(raw_df)}).")
         return
 
-    models = joblib.load(model_path)
     latest_row = df_feat.iloc[[-1]]
     X_latest = latest_row[FEATURES]
 
@@ -142,11 +151,11 @@ def predict_for_timeframe(conn, raw_df, tf):
     rsi = float(latest_row["rsi"].iloc[0])
     anchor_ema = float(latest_row["ema_fast"].iloc[0])
 
-    # Predict Upside and Downside range in price units
+    # Predict Upside and Downside stretch relative to anchor_ema
     pred_up = float(models["up"].predict(X_latest)[0])
     pred_down = float(models["down"].predict(X_latest)[0])
 
-    # Anchor projected range to the timeframe's structural EMA instead of floating live price
+    # Anchor projected range to the timeframe's structural EMA (matches train.py target_up/target_down)
     proj_high = anchor_ema + pred_up
     proj_low = anchor_ema - pred_down
     total_range = max(proj_high - proj_low, 10.0)
