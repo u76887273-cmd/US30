@@ -20,13 +20,13 @@ jobs:
     timeout-minutes: 10
 
     env:
-      CTRADER_CLIENT_ID: ${{ secrets.CTRADER_CLIENT_ID }}
-      CTRADER_CLIENT_SECRET: ${{ secrets.CTRADER_CLIENT_SECRET }}
-      CTRADER_ACCESS_TOKEN: ${{ secrets.CTRADER_ACCESS_TOKEN }}
-      CTRADER_ACCOUNT_ID: ${{ secrets.CTRADER_ACCOUNT_ID }}
-      ACCOUNT_ID: ${{ secrets.ACCOUNT_ID }}
-      SYMBOL_ID: ${{ secrets.SYMBOL_ID }}
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      CTRADER_CLIENT_ID: ${{ secrets.CTRADER_CLIENT_ID || secrets.CLIENT_ID || secrets.CTRADER_ID || vars.CTRADER_CLIENT_ID || vars.CLIENT_ID }}
+      CTRADER_CLIENT_SECRET: ${{ secrets.CTRADER_CLIENT_SECRET || secrets.CLIENT_SECRET || secrets.CTRADER_SECRET || vars.CTRADER_CLIENT_SECRET || vars.CLIENT_SECRET }}
+      CTRADER_ACCESS_TOKEN: ${{ secrets.CTRADER_ACCESS_TOKEN || secrets.ACCESS_TOKEN || secrets.CTRADER_TOKEN || vars.CTRADER_ACCESS_TOKEN || vars.ACCESS_TOKEN }}
+      CTRADER_ACCOUNT_ID: ${{ secrets.CTRADER_ACCOUNT_ID || secrets.ACCOUNT_ID || secrets.CTID_TRADER_ACCOUNT_ID || vars.CTRADER_ACCOUNT_ID || vars.ACCOUNT_ID }}
+      ACCOUNT_ID: ${{ secrets.ACCOUNT_ID || secrets.CTRADER_ACCOUNT_ID || secrets.CTID_TRADER_ACCOUNT_ID || vars.ACCOUNT_ID || vars.CTRADER_ACCOUNT_ID }}
+      SYMBOL_ID: ${{ secrets.SYMBOL_ID || secrets.CTRADER_SYMBOL_ID || vars.SYMBOL_ID || '1287' }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL || secrets.SUPABASE_DB_URL || secrets.DB_URL || secrets.POSTGRES_URL || vars.DATABASE_URL }}
 
     steps:
       - name: 📥 Checkout Repository
@@ -34,13 +34,12 @@ jobs:
 
       - name: 🔍 Normalize Script Filenames & Locations
         run: |
-          echo "=== Files currently in repository ==="
+          echo "=== Verifying repository files ==="
           find . -maxdepth 3 -not -path '*/.*'
-          # Normalize case/location if mobile keyboard capitalized filenames (e.g., Data.py -> data.py)
           for script in data.py train.py predict.py validator.py requirements.txt; do
             found=$(find . -maxdepth 3 -iname "$script" | head -n 1)
             if [ -n "$found" ] && [ "$found" != "./$script" ]; then
-              echo "Moving $found -> ./$script"
+              echo "Normalizing $found -> ./$script"
               cp "$found" "./$script"
             fi
           done
