@@ -1,10 +1,13 @@
 import os
+import sys
 import json
 import datetime
 import joblib
 import psycopg
 import pandas as pd
-from train import build_features, FEATURES
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from train import build_features, FEATURES, ensure_unique_timestamp_constraint
 
 DB_URL = os.environ.get("DATABASE_URL")
 RAW_BARS_TABLE = "m5_bars"
@@ -21,19 +24,21 @@ def parse_mixed_timestamps(series):
         return pd.to_datetime(series, format="mixed", utc=True, errors="coerce")
 
 def get_live_spot_quote():
-    """Reads latest_quote.json produced by data.py to get the exact real-time cTrader BID."""
+    """Reads latest_quote.json produced by data.py if a fresh quote was received."""
     if os.path.exists("latest_quote.json"):
         try:
             with open("latest_quote.json", "r", encoding="utf-8") as f:
                 data = json.load(f)
-            price = data.get("current_price")
-            if price is not None and float(price) > 1000:
-                return float(price)
+            if data.get("status") == "QUOTE_RECEIVED":
+                price = data.get("current_price")
+                if price is not None and float(price) > 1000:
+                    return float(price)
         except Exception as e:
             print(f"Note reading latest_quote.json: {e}")
     return None
 
 def sync_recent_bars_and_load_warmup(conn, live_spot):
+    ensure_unique_timestamp_constraint(conn)
     local_df = pd.DataFrame()
     if os.path.exists("data_m5.csv"):
         try:
@@ -71,7 +76,11 @@ def sync_recent_bars_and_load_warmup(conn, live_spot):
                         f"""
                         INSERT INTO {RAW_BARS_TABLE} (timestamp, open, high, low, close, volume)
                         VALUES (%s, %s, %s, %s, %s, %s)
-                        ON CONFLICT DO NOTHING;
+                        ON CONFLICT (timestamp) DO UPDATE SET
+                            high = GREATEST({RAW_BARS_TABLE}.high, EXCLUDED.high),
+                            low = LEAST({RAW_BARS_TABLE}.low, EXCLUDED.low),
+                            close = EXCLUDED.close,
+                            volume = EXCLUDED.volume;
                         """,
                         insert_data
                     )
