@@ -1,9 +1,9 @@
 ctrader-open-api
 twisted
 service_identity
+pyOpenSSL
 pandas
 numpy
 scikit-learn
 joblib
 psycopg[binary]
-yfinance
