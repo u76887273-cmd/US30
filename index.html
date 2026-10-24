@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>EUR/USD (30M & 4H)</title>
+    <title>US30 (30M & 4H)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body { background-color: #0f172a; color: #f8fafc; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
@@ -19,7 +19,7 @@
         <!-- Header + Latest Run Time (H:M) + Current Price -->
         <div class="glass rounded-2xl p-5 mb-6 shadow-xl flex flex-col sm:flex-row items-center justify-between gap-4">
             <div class="text-center sm:text-left">
-                <h1 class="text-4xl font-extrabold text-sky-400 glow-text tracking-tight">EUR/USD</h1>
+                <h1 class="text-4xl font-extrabold text-sky-400 glow-text tracking-tight">US30</h1>
             </div>
 
             <!-- Latest Run Time (H:M only) & Current Price -->
@@ -137,20 +137,20 @@
 
         const GITHUB_USERNAME = window.location.hostname.includes("github.io") 
             ? window.location.hostname.split(".")[0] 
-            : "u76887273-cmd"; 
+            : "u76887273-cmd";
 
         // Safely detect GitHub repo name without accidentally grabbing "index.html"
         const pathSegment = window.location.pathname.split("/")[1] || "";
         const GITHUB_REPO = (pathSegment && !pathSegment.endsWith(".html"))
             ? pathSegment
-            : "eurusd_30M_4H";
+            : "US30-Quantum-";
 
         let latestKnownRunIso = null;
 
-        // Format any EUR/USD price number in a string to 4 decimals
-        function formatPricesTo4Decimals(str) {
+        // Format any US30 price number in a string to integer (0 decimals)
+        function formatPricesToInteger(str) {
             if (!str) return "--";
-            return str.replace(/\b(\d+\.\d{3,6})\b/g, (match) => Number(match).toFixed(4));
+            return str.replace(/\b(\d+\.\d+)\b/g, (match) => Math.round(Number(match)).toString());
         }
 
         function renderTimeframeCard(tf, row) {
@@ -166,6 +166,7 @@
                 sigEl.className = "text-5xl font-extrabold tracking-tight text-slate-300";
             }
 
+            // Parse Bias, RSI, and EQ from reason string ("Bias:54.2% | RSI:48.1 | EQ:42150")
             const rawReason = row.reason || "";
             const eqMatch = rawReason.match(/EQ:\s*([0-9.]+)/i);
             const rsiMatch = rawReason.match(/RSI:\s*([0-9.]+)/i);
@@ -175,7 +176,7 @@
             const biasText = biasMatch ? (biasMatch[1].endsWith("%") ? biasMatch[1] : `${biasMatch[1]}%`) : "--";
             document.getElementById(`meta-val-${tf}`).innerText = `RSI: ${rsiText} | Bias: ${biasText}`;
 
-            // Render HIT_TP or ACTIVE badge
+            // Render HIT_TP or ACTIVE badge for BUY/SELL signals
             const statusEl = document.getElementById(`status-val-${tf}`);
             if (row.status === "HIT_TP") {
                 statusEl.innerText = "HIT TP ✓";
@@ -190,9 +191,9 @@
             const eqValue = (row.take_profit !== null && row.take_profit !== undefined)
                 ? Number(row.take_profit)
                 : (eqMatch ? Number(eqMatch[1]) : null);
-            const eqFormatted = (eqValue !== null && !Number.isNaN(eqValue)) ? eqValue.toFixed(4) : "--";
+            const eqFormatted = (eqValue !== null && !Number.isNaN(eqValue)) ? Math.round(eqValue).toString() : "--";
 
-            const zoneText = formatPricesTo4Decimals(row.entry_zone || "-");
+            const zoneText = formatPricesToInteger(row.entry_zone || "-");
             if (zoneText.includes("|")) {
                 const parts = zoneText.split("|");
                 document.getElementById(`buy-zone-${tf}`).innerText = parts[0].replace("B:", "").trim();
@@ -235,8 +236,8 @@
 
             try {
                 const [res30m, res4h] = await Promise.allSettled([
-                    fetchTableLatest("eurusd_grid_log_30m"),
-                    fetchTableLatest("eurusd_grid_log_4h")
+                    fetchTableLatest("supreme_grid_log"),
+                    fetchTableLatest("supreme_grid_log_4h")
                 ]);
 
                 const data30m = res30m.status === "fulfilled" ? res30m.value : [];
@@ -245,6 +246,7 @@
                 const row30 = data30m && data30m.length > 0 ? data30m[0] : null;
                 const row4h = data4h && data4h.length > 0 ? data4h[0] : null;
 
+                // Pick whichever row has the newest timestamp for the top header bar
                 const headerRow = row30 || row4h;
                 if (headerRow) {
                     const rawTs = headerRow.created_at || headerRow.timestamp;
@@ -255,7 +257,7 @@
                         minute: '2-digit',
                         hour12: false
                     });
-                    document.getElementById('price-val').innerText = Number(headerRow.price).toFixed(4);
+                    document.getElementById('price-val').innerText = Math.round(Number(headerRow.price)).toString();
                 }
 
                 if (row30) renderTimeframeCard("30m", row30);
@@ -270,13 +272,13 @@
         }
 
         async function forceRun() {
-            let token = localStorage.getItem("github_pat_eurusd") || localStorage.getItem("github_pat_us30") || localStorage.getItem("github_pat");
+            let token = localStorage.getItem("github_pat_us30") || localStorage.getItem("github_pat");
             
             if (!token) {
                 token = prompt("🔒 FIRST TIME SETUP:\n\nPlease paste your GitHub Token (ghp_... or github_pat_...) here:");
                 if (!token) return; 
                 token = token.trim();
-                localStorage.setItem("github_pat_eurusd", token); 
+                localStorage.setItem("github_pat_us30", token); 
             }
 
             const btn = document.getElementById("force-btn");
@@ -285,8 +287,8 @@
             btn.innerHTML = "<span>⏳ Triggering...</span>";
 
             try {
-                // Checks pipeline.yml first (matching your renamed workflow file), then fallbacks
-                const workflows = ["pipeline.yml", "run-pipeline.yml", "main.yml"];
+                // Checks run-pipeline.yml, pipeline.yml, and main.yml automatically
+                const workflows = ["run-pipeline.yml", "pipeline.yml", "main.yml"];
                 let response = null;
 
                 for (const wf of workflows) {
@@ -306,6 +308,7 @@
                     const prevRunIso = latestKnownRunIso;
                     let remaining = 35;
 
+                    // Live countdown & fast-polling until the new run finishes and writes to Supabase
                     const pollTimer = setInterval(async () => {
                         remaining -= 5;
                         btn.innerHTML = `<span>⏳ Running Engine (${Math.max(remaining, 0)}s)...</span>`;
@@ -323,7 +326,6 @@
                     if (response && (response.status === 401 || response.status === 403)) {
                         localStorage.removeItem("github_pat");
                         localStorage.removeItem("github_pat_us30");
-                        localStorage.removeItem("github_pat_eurusd");
                         alert(`❌ Token unauthorized or expired for ${GITHUB_USERNAME}/${GITHUB_REPO}. Cleared from memory—click again to enter a new token.`);
                     } else if (response && response.status === 404) {
                         alert(`❌ Workflow file or repository (${GITHUB_USERNAME}/${GITHUB_REPO}) not found (HTTP 404). Make sure your token has 'repo' and 'workflow' permissions.`);
