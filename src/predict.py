@@ -98,12 +98,13 @@ def init_db_table(conn, table_name):
                 price NUMERIC(10, 2) NOT NULL,
                 signal VARCHAR(16) NOT NULL,
                 reason TEXT,
-                entry_zone VARCHAR(64),
+                entry_zone VARCHAR(128),
                 entry NUMERIC(10, 2),
                 take_profit NUMERIC(10, 2),
                 status VARCHAR(32) DEFAULT 'ACTIVE',
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
+            ALTER TABLE {table_name} ALTER COLUMN entry_zone TYPE VARCHAR(128);
             GRANT SELECT ON {table_name} TO anon, authenticated;
         """)
     conn.commit()
@@ -146,8 +147,9 @@ def predict_for_timeframe(conn, raw_df, tf):
     midline_eq = (proj_high + proj_low) / 2.0
     half_range = total_range / 2.0
 
-    sell_trigger = midline_eq + (half_range * 0.60)
-    buy_trigger = midline_eq - (half_range * 0.60)
+    # 1. Updated 55% Distance Threshold (0.55) applied to BOTH 30m and 4h
+    sell_trigger = midline_eq + (half_range * 0.55)
+    buy_trigger = midline_eq - (half_range * 0.55)
 
     if price <= buy_trigger:
         signal = "BUY"
@@ -156,21 +158,23 @@ def predict_for_timeframe(conn, raw_df, tf):
     else:
         signal = "WAIT"
 
-    zone_height = max(half_range * 0.20, 5.0)
-    buy_low = round(proj_low, 0)
-    buy_high = round(proj_low + zone_height, 0)
-    sell_low = round(proj_high - zone_height, 0)
-    sell_high = round(proj_high, 0)
+    # 2. Three Buy Tiers & Three Sell Tiers (0.55, 0.80, 1.00 of half_range from EQ)
+    b_055 = round(midline_eq - (half_range * 0.55), 0)
+    b_080 = round(midline_eq - (half_range * 0.80), 0)
+    b_100 = round(midline_eq - (half_range * 1.00), 0)  # Equals proj_low
+
+    s_055 = round(midline_eq + (half_range * 0.55), 0)
+    s_080 = round(midline_eq + (half_range * 0.80), 0)
+    s_100 = round(midline_eq + (half_range * 1.00), 0)  # Equals proj_high
 
     price_0d = round(price, 0)
     eq_0d = round(midline_eq, 0)
 
-    if signal == "BUY":
-        entry_zone = f"B: {buy_low:.0f} - {buy_high:.0f} | S: WAITING"
-    elif signal == "SELL":
-        entry_zone = f"B: WAITING | S: {sell_low:.0f} - {sell_high:.0f}"
-    else:
-        entry_zone = f"B: {buy_low:.0f} - {buy_high:.0f} | S: {sell_low:.0f} - {sell_high:.0f}"
+    # Store all 3 Buy and 3 Sell levels so the dashboard always displays them clearly
+    entry_zone = (
+        f"B0.55:{b_055:.0f},B0.80:{b_080:.0f},B1.00:{b_100:.0f} | "
+        f"S0.55:{s_055:.0f},S0.80:{s_080:.0f},S1.00:{s_100:.0f}"
+    )
 
     up_ratio = (pred_up / total_range) * 100.0
     down_ratio = (pred_down / total_range) * 100.0
@@ -187,7 +191,11 @@ def predict_for_timeframe(conn, raw_df, tf):
             VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE')
         """, (run_ts, price_0d, signal, reason, entry_zone, price_0d, eq_0d))
     conn.commit()
-    print(f"[{tf.upper()}] {signal} @ {price_0d:.0f} | AnchorEMA:{anchor_ema:.0f} | Buy<={buy_trigger:.0f} Sell>={sell_trigger:.0f} | EQ/TP: {eq_0d:.0f} | {reason}")
+    print(
+        f"[{tf.upper()}] {signal} @ {price_0d:.0f} | AnchorEMA:{anchor_ema:.0f} | "
+        f"Buy(0.55/0.8/1.0): {b_055:.0f}/{b_080:.0f}/{b_100:.0f} | "
+        f"Sell(0.55/0.8/1.0): {s_055:.0f}/{s_080:.0f}/{s_100:.0f} | EQ/TP: {eq_0d:.0f}"
+    )
 
 if __name__ == "__main__":
     with psycopg.connect(DB_URL) as conn:
