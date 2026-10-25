@@ -139,7 +139,6 @@
             ? window.location.hostname.split(".")[0] 
             : "u76887273-cmd";
 
-        // Safely detect GitHub repo name without accidentally grabbing "index.html"
         const pathSegment = window.location.pathname.split("/")[1] || "";
         const GITHUB_REPO = (pathSegment && !pathSegment.endsWith(".html"))
             ? pathSegment
@@ -147,7 +146,6 @@
 
         let latestKnownRunIso = null;
 
-        // Format any US30 price number in a string to integer (0 decimals)
         function formatPricesToInteger(str) {
             if (!str) return "--";
             return str.replace(/\b(\d+\.\d+)\b/g, (match) => Math.round(Number(match)).toString());
@@ -166,7 +164,6 @@
                 sigEl.className = "text-5xl font-extrabold tracking-tight text-slate-300";
             }
 
-            // Parse Bias, RSI, and EQ from reason string ("Bias:54.2% | RSI:48.1 | EQ:42150")
             const rawReason = row.reason || "";
             const eqMatch = rawReason.match(/EQ:\s*([0-9.]+)/i);
             const rsiMatch = rawReason.match(/RSI:\s*([0-9.]+)/i);
@@ -176,7 +173,6 @@
             const biasText = biasMatch ? (biasMatch[1].endsWith("%") ? biasMatch[1] : `${biasMatch[1]}%`) : "--";
             document.getElementById(`meta-val-${tf}`).innerText = `RSI: ${rsiText} | Bias: ${biasText}`;
 
-            // Render HIT_TP or ACTIVE badge for BUY/SELL signals
             const statusEl = document.getElementById(`status-val-${tf}`);
             if (row.status === "HIT_TP") {
                 statusEl.innerText = "HIT TP ✓";
@@ -246,7 +242,6 @@
                 const row30 = data30m && data30m.length > 0 ? data30m[0] : null;
                 const row4h = data4h && data4h.length > 0 ? data4h[0] : null;
 
-                // Pick whichever row has the newest timestamp for the top header bar
                 const headerRow = row30 || row4h;
                 if (headerRow) {
                     const rawTs = headerRow.created_at || headerRow.timestamp;
@@ -287,8 +282,7 @@
             btn.innerHTML = "<span>⏳ Triggering...</span>";
 
             try {
-                // Checks run-pipeline.yml, pipeline.yml, and main.yml automatically
-                const workflows = ["run-pipeline.yml", "pipeline.yml", "main.yml"];
+                const workflows = ["run-pipeline.yml", "main.yml", "pipeline.yml"];
                 let response = null;
 
                 for (const wf of workflows) {
@@ -308,7 +302,6 @@
                     const prevRunIso = latestKnownRunIso;
                     let remaining = 35;
 
-                    // Live countdown & fast-polling until the new run finishes and writes to Supabase
                     const pollTimer = setInterval(async () => {
                         remaining -= 5;
                         btn.innerHTML = `<span>⏳ Running Engine (${Math.max(remaining, 0)}s)...</span>`;
