@@ -1,4 +1,5 @@
 import os
+import json
 import datetime
 import joblib
 import psycopg
@@ -19,7 +20,21 @@ def parse_mixed_timestamps(series):
     except Exception:
         return pd.to_datetime(series, format="mixed", utc=True, errors="coerce")
 
-def sync_recent_bars_and_load_warmup(conn):
+def get_live_spot_quote():
+    """Reads latest_quote.json produced by data.py if a fresh cTrader spot quote was received."""
+    if os.path.exists("latest_quote.json"):
+        try:
+            with open("latest_quote.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("status") == "QUOTE_RECEIVED":
+                price = data.get("current_price")
+                if price is not None and float(price) > 1000:
+                    return float(price)
+        except Exception as e:
+            print(f"Note reading latest_quote.json: {e}")
+    return None
+
+def sync_recent_bars_and_load_warmup(conn, live_spot):
     local_df = pd.DataFrame()
     if os.path.exists("data_m5.csv"):
         try:
@@ -33,8 +48,19 @@ def sync_recent_bars_and_load_warmup(conn):
 
                 local_df = local_df.dropna(subset=["timestamp", "open", "high", "low", "close"]).sort_values("timestamp")
 
+                if live_spot is not None and not local_df.empty:
+                    idx = local_df.index[-1]
+                    local_df.loc[idx, "close"] = live_spot
+                    if live_spot > float(local_df.loc[idx, "high"]):
+                        local_df.loc[idx, "high"] = live_spot
+                    if live_spot < float(local_df.loc[idx, "low"]):
+                        local_df.loc[idx, "low"] = live_spot
+
                 recent_slice = local_df.tail(500)
                 with conn.cursor() as cur:
+                    # Delete overlapping recent timestamps first so updated closes always overwrite stale rows
+                    min_recent_ts = recent_slice["timestamp"].iloc[0].isoformat()
+                    cur.execute(f"DELETE FROM {RAW_BARS_TABLE} WHERE timestamp >= %s;", (min_recent_ts,))
                     insert_data = [
                         (
                             row["timestamp"].isoformat(),
@@ -56,6 +82,7 @@ def sync_recent_bars_and_load_warmup(conn):
                     )
                 conn.commit()
         except Exception as e:
+            conn.rollback()
             print(f"Note on live bar sync: {e}")
 
     db_df = pd.DataFrame()
@@ -79,6 +106,7 @@ def sync_recent_bars_and_load_warmup(conn):
     except Exception as e:
         print(f"Note on DB warmup fetch: {e}")
 
+    # Place local_df second so fresh cTrader bars always take priority with keep="last"
     combined = pd.concat([db_df, local_df], ignore_index=True)
     combined = (
         combined.dropna(subset=["timestamp", "open", "high", "low", "close"])
@@ -87,6 +115,15 @@ def sync_recent_bars_and_load_warmup(conn):
         .tail(1500)
         .reset_index(drop=True)
     )
+
+    if live_spot is not None and not combined.empty:
+        idx = combined.index[-1]
+        combined.loc[idx, "close"] = live_spot
+        if live_spot > float(combined.loc[idx, "high"]):
+            combined.loc[idx, "high"] = live_spot
+        if live_spot < float(combined.loc[idx, "low"]):
+            combined.loc[idx, "low"] = live_spot
+
     return combined
 
 def init_db_table(conn, table_name):
@@ -109,7 +146,7 @@ def init_db_table(conn, table_name):
         """)
     conn.commit()
 
-def predict_for_timeframe(conn, raw_df, tf):
+def predict_for_timeframe(conn, raw_df, tf, live_spot):
     model_path = f"model_{tf}.pkl"
     table_name = TABLES[tf]
 
@@ -133,7 +170,8 @@ def predict_for_timeframe(conn, raw_df, tf):
     latest_row = df_feat.iloc[[-1]]
     X_latest = latest_row[FEATURES]
 
-    price = float(latest_row["close"].iloc[0])
+    # Use live cTrader spot price if available, otherwise latest M5 bar close
+    price = float(live_spot) if live_spot is not None else float(latest_row["close"].iloc[0])
     rsi = float(latest_row["rsi"].iloc[0])
     anchor_ema = float(latest_row["ema_fast"].iloc[0])
 
@@ -147,7 +185,7 @@ def predict_for_timeframe(conn, raw_df, tf):
     midline_eq = (proj_high + proj_low) / 2.0
     half_range = total_range / 2.0
 
-    # 1. Updated 55% Distance Threshold (0.55) applied to BOTH 30m and 4h
+    # 1. 55% Distance Threshold (0.55) applied to BOTH 30m and 4h
     sell_trigger = midline_eq + (half_range * 0.55)
     buy_trigger = midline_eq - (half_range * 0.55)
 
@@ -170,7 +208,6 @@ def predict_for_timeframe(conn, raw_df, tf):
     price_0d = round(price, 0)
     eq_0d = round(midline_eq, 0)
 
-    # Store all 3 Buy and 3 Sell levels so the dashboard always displays them clearly
     entry_zone = (
         f"B0.55:{b_055:.0f},B0.80:{b_080:.0f},B1.00:{b_100:.0f} | "
         f"S0.55:{s_055:.0f},S0.80:{s_080:.0f},S1.00:{s_100:.0f}"
@@ -192,13 +229,14 @@ def predict_for_timeframe(conn, raw_df, tf):
         """, (run_ts, price_0d, signal, reason, entry_zone, price_0d, eq_0d))
     conn.commit()
     print(
-        f"[{tf.upper()}] {signal} @ {price_0d:.0f} | AnchorEMA:{anchor_ema:.0f} | "
+        f"[{tf.upper()}] {signal} @ {price_0d:.0f} (Spot: {price:.2f}) | AnchorEMA:{anchor_ema:.0f} | "
         f"Buy(0.55/0.8/1.0): {b_055:.0f}/{b_080:.0f}/{b_100:.0f} | "
         f"Sell(0.55/0.8/1.0): {s_055:.0f}/{s_080:.0f}/{s_100:.0f} | EQ/TP: {eq_0d:.0f}"
     )
 
 if __name__ == "__main__":
+    live_spot = get_live_spot_quote()
     with psycopg.connect(DB_URL) as conn:
-        raw_df = sync_recent_bars_and_load_warmup(conn)
+        raw_df = sync_recent_bars_and_load_warmup(conn, live_spot)
         for tf in ["30m", "4h"]:
-            predict_for_timeframe(conn, raw_df, tf)
+            predict_for_timeframe(conn, raw_df, tf, live_spot)
