@@ -1,12 +1,14 @@
-name: US30 Quantum Dual Engine (30M & 4H)
+name: US30 Quantum Live Engine (30M and 4H)
 
 on:
   schedule:
-    - cron: '*/15 * * * 1-5'
+    - cron: '*/15 21-23 * * 0'
+    - cron: '*/15 * * * 1-4'
+    - cron: '*/15 0-22 * * 5'
   workflow_dispatch:
     inputs:
-      force_retrain:
-        description: 'Force retrain AI models even if already trained today?'
+      force_train:
+        description: 'Force AI model retraining (true/false)'
         required: false
         default: 'false'
 
@@ -18,68 +20,92 @@ permissions:
   contents: write
 
 jobs:
-  run-engine:
+  run-pipeline:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     env:
-      CTRADER_CLIENT_ID: ${{ secrets.CTRADER_CLIENT_ID || secrets.CLIENT_ID || secrets.CTRADER_ID || vars.CTRADER_CLIENT_ID || vars.CLIENT_ID }}
-      CTRADER_CLIENT_SECRET: ${{ secrets.CTRADER_CLIENT_SECRET || secrets.CLIENT_SECRET || secrets.CTRADER_SECRET || vars.CTRADER_CLIENT_SECRET || vars.CLIENT_SECRET }}
-      CTRADER_ACCESS_TOKEN: ${{ secrets.CTRADER_ACCESS_TOKEN || secrets.ACCESS_TOKEN || secrets.CTRADER_TOKEN || vars.CTRADER_ACCESS_TOKEN || vars.ACCESS_TOKEN }}
-      CTRADER_ACCOUNT_ID: ${{ secrets.CTRADER_ACCOUNT_ID || secrets.ACCOUNT_ID || secrets.CTID_TRADER_ACCOUNT_ID || vars.CTRADER_ACCOUNT_ID || vars.ACCOUNT_ID }}
-      ACCOUNT_ID: ${{ secrets.ACCOUNT_ID || secrets.CTRADER_ACCOUNT_ID || secrets.CTID_TRADER_ACCOUNT_ID || vars.ACCOUNT_ID || vars.CTRADER_ACCOUNT_ID }}
-      SYMBOL_ID: ${{ secrets.SYMBOL_ID || secrets.CTRADER_SYMBOL_ID || vars.SYMBOL_ID || '1287' }}
-      DATABASE_URL: ${{ secrets.DATABASE_URL || secrets.SUPABASE_DB_URL || secrets.DB_URL || secrets.POSTGRES_URL || vars.DATABASE_URL }}
+      PYTHONPATH: .:./src
+      DATABASE_URL: ${{ secrets.DATABASE_URL || secrets.SUPABASE_DB_URL || vars.DATABASE_URL }}
+      CTRADER_CLIENT_ID: ${{ secrets.CTRADER_CLIENT_ID || secrets.CLIENT_ID || vars.CTRADER_CLIENT_ID }}
+      CTRADER_CLIENT_SECRET: ${{ secrets.CTRADER_CLIENT_SECRET || secrets.CLIENT_SECRET || vars.CTRADER_CLIENT_SECRET }}
+      CTRADER_ACCESS_TOKEN: ${{ secrets.CTRADER_ACCESS_TOKEN || secrets.ACCESS_TOKEN || vars.CTRADER_ACCESS_TOKEN }}
+      ACCOUNT_ID: ${{ secrets.ACCOUNT_ID || secrets.CTRADER_ACCOUNT_ID || vars.ACCOUNT_ID }}
+      CTRADER_ACCOUNT_ID: ${{ secrets.CTRADER_ACCOUNT_ID || secrets.ACCOUNT_ID || vars.CTRADER_ACCOUNT_ID }}
+      SYMBOL_ID: ${{ secrets.SYMBOL_ID || secrets.CTRADER_SYMBOL_ID || vars.SYMBOL_ID }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
-      - name: 📥 Checkout Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🔍 Normalize Script Filenames & Locations
+      - name: Sync Root and src Script Locations
         run: |
-          for script in data.py train.py predict.py validator.py requirements.txt; do
-            found=$(find . -maxdepth 3 -iname "$script" | head -n 1)
-            if [ -n "$found" ] && [ "$found" != "./$script" ]; then
-              cp "$found" "./$script"
+          mkdir -p src
+          for script in data.py train.py predict.py validator.py; do
+            if [ -f "$script" ] && [ -f "src/$script" ]; then
+              if [ "$script" -nt "src/$script" ]; then
+                cp "$script" "src/$script"
+              else
+                cp "src/$script" "$script"
+              fi
+            elif [ -f "$script" ] && [ ! -f "src/$script" ]; then
+              cp "$script" "src/$script"
+            elif [ -f "src/$script" ] && [ ! -f "$script" ]; then
+              cp "src/$script" "$script"
             fi
           done
 
-      - name: 🐍 Set up Python 3.11 (No Cache Egress)
+      - name: Set up Python 3.11 (No Cache Egress)
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: 📦 Install Dependencies
+      - name: Install Dependencies
         run: |
-          pip install --no-cache-dir -r requirements.txt
+          if [ -f "requirements.txt" ]; then
+            pip install --no-cache-dir -r requirements.txt
+          else
+            pip install --no-cache-dir "psycopg[binary]==3.1.18" ctrader-open-api==0.9.2 pandas numpy scikit-learn joblib twisted service_identity pyOpenSSL
+          fi
 
-      - name: 📡 Step 1 - Fetch Latest M5 Bars (data.py)
-        run: python data.py
+      - name: 1. Fetch Live Market Data and Spot Price (cTrader)
+        run: python src/data.py
 
-      - name: 🧠 Step 2 - Train Models Once Per Day (train.py)
+      - name: 2. Daily AI Model Retraining (Once Per Day or Forced)
         run: |
           TODAY_UTC=$(date -u +'%Y-%m-%d')
+          FORCE_TRAIN=$(echo "${{ github.event.inputs.force_train }}" | tr '[:upper:]' '[:lower:]')
           LAST_TRAINED=""
           if [ -f .last_trained_date ]; then
             LAST_TRAINED=$(cat .last_trained_date | tr -d '[:space:]')
+          elif [ -f last_trained.txt ]; then
+            LAST_TRAINED=$(cut -c 1-10 last_trained.txt)
           fi
 
-          if [ "$LAST_TRAINED" != "$TODAY_UTC" ] || [ ! -f model_30m.pkl ] || [ ! -f model_4h.pkl ] || [ "${{ github.event.inputs.force_retrain }}" = "true" ]; then
-            echo "🔄 Training models for UTC date $TODAY_UTC..."
-            python train.py
+          if [ "$FORCE_TRAIN" = "true" ]; then
+            echo "FORCING model retrain: Removing local models..."
+            rm -f *.pkl .last_trained_date last_trained.txt
+          fi
+
+          if [ "$LAST_TRAINED" != "$TODAY_UTC" ] || [ ! -f "model_30m.pkl" ] || [ ! -f "model_4h.pkl" ]; then
+            echo "🔄 Running Daily US30 AI Model Training for UTC date $TODAY_UTC..."
+            python src/train.py
             echo "$TODAY_UTC" > .last_trained_date
+            date -u +'%Y-%m-%dT%H:%M:%SZ' > last_trained.txt
 
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add -f model_30m.pkl model_4h.pkl .last_trained_date
-            git commit -m "chore: daily model update ($TODAY_UTC) [skip ci]" || true
+            git add -f model_30m.pkl model_4h.pkl .last_trained_date last_trained.txt
+            git commit -m "chore: daily US30 model update ($TODAY_UTC) [skip ci]" || true
             git push origin HEAD:main || true
           else
-            echo "✅ Models already trained today ($TODAY_UTC). Skipping train.py!"
+            echo "⚡ Skipping training! US30 models already trained today ($TODAY_UTC)."
           fi
 
-      - name: 🎯 Step 3 - Run 30M & 4H Predictions (predict.py)
-        run: python predict.py
+      - name: 3. Run AI Prediction Engine
+        run: python src/predict.py
 
-      - name: ✅ Step 4 - Validate Active Signals Against TP (validator.py)
-        run: python validator.py
+      - name: 4. Run Grid State Validator
+        run: python src/validator.py
