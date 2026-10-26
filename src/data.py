@@ -53,6 +53,7 @@ symbol_name = "#US30"
 m5_done = False
 quote_done = False
 shutting_down = False
+latest_m5_close = None
 
 
 def utc_now():
@@ -92,8 +93,22 @@ def maybe_finish():
 
 
 def on_spot_wait_timeout():
+    global quote_done
     if not shutting_down and m5_done and not quote_done:
-        print("ℹ️ No new spot tick arrived within 6s of M5 fetch. Using latest M5 bar close as fallback.")
+        if latest_m5_close is not None:
+            payload = {
+                "status": "QUOTE_RECEIVED",
+                "symbol": symbol_name,
+                "symbol_id": SYMBOL_ID,
+                "current_price": latest_m5_close,
+                "price_basis": "m5_close_fallback",
+                "bid": latest_m5_close,
+                "ask": latest_m5_close,
+                "received_at_utc": iso_utc(utc_now()),
+            }
+            write_json_atomic(DATA_DIR / "latest_quote.json", payload)
+            print(f"ℹ️ Using latest M5 bar close ({latest_m5_close:.{PRICE_DIGITS}f}) as live price.")
+        quote_done = True
         stop_reactor_safely()
 
 
@@ -154,7 +169,7 @@ def trendbar_to_row(bar):
 
 
 def on_trendbars(result):
-    global m5_done, spot_wait_call
+    global m5_done, spot_wait_call, latest_m5_close
     response = Protobuf.extract(result)
     rows = [trendbar_to_row(bar) for bar in response.trendbar]
     path = DATA_DIR / "data_m5.csv"
@@ -167,10 +182,11 @@ def on_trendbars(result):
             .reset_index(drop=True)
         )
         df.to_csv(path, index=False)
+        latest_m5_close = float(df["close"].iloc[-1])
         print(
             f"[M5] Saved {len(df):,} pure closed M5 bars. "
             f"Latest bar: {df['timestamp'].iloc[-1]} | "
-            f"Close: {df['close'].iloc[-1]:.{PRICE_DIGITS}f}"
+            f"Close: {latest_m5_close:.{PRICE_DIGITS}f}"
         )
     else:
         print("⚠️ WARNING: No M5 bars returned by cTrader.")
@@ -194,14 +210,13 @@ def start_market_data_requests():
     d_spot = client.send(spot_req, responseTimeoutInSeconds=20)
     d_spot.addErrback(on_fatal_error)
 
-    # 2. Request latest 5 days (~1,440 bars) of M5 candles
+    # 2. Request latest 5 days of M5 candles (NO bar_req.count cap so newest bars are never truncated!)
     bar_req = ProtoOAGetTrendbarsReq()
     bar_req.ctidTraderAccountId = ACCOUNT_ID
     bar_req.symbolId = SYMBOL_ID
     bar_req.period = ProtoOATrendbarPeriod.M5
     bar_req.fromTimestamp = int((now - dt.timedelta(days=5)).timestamp() * 1000)
     bar_req.toTimestamp = now_ms
-    bar_req.count = 1800
 
     d_bars = client.send(bar_req, responseTimeoutInSeconds=20)
     d_bars.addCallback(on_trendbars)
@@ -224,7 +239,6 @@ def on_message_received(_client, message):
 
     bid_raw = int(getattr(event, "bid", 0) or 0)
     ask_raw = int(getattr(event, "ask", 0) or 0)
-    close_raw = int(getattr(event, "sessionClose", 0) or 0)
 
     def scale_val(raw):
         if raw <= 0:
@@ -234,15 +248,16 @@ def on_message_received(_client, message):
 
     bid = scale_val(bid_raw)
     ask = scale_val(ask_raw)
-    session_close = scale_val(close_raw)
 
-    if bid is not None:
+    # Strictly require a live BID or ASK tick (never use stale sessionClose!)
+    if bid is not None and ask is not None:
+        current_price, price_basis = round((bid + ask) / 2.0, PRICE_DIGITS), "mid_bid_ask"
+    elif bid is not None:
         current_price, price_basis = bid, "bid"
     elif ask is not None:
-        current_price, price_basis = ask, "ask_fallback"
-    elif session_close is not None:
-        current_price, price_basis = session_close, "session_close_fallback"
+        current_price, price_basis = ask, "ask"
     else:
+        # Ignore initial snapshot packet that only carries yesterday's sessionClose
         return
 
     payload = {
