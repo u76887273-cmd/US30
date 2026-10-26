@@ -1,4 +1,4 @@
-"""Fetch cTrader US30 M5 bars and live spot quote with clean connection handling."""
+"""Fetch cTrader US30 M5 bars (latest 36h) and live spot quote with zero truncation."""
 
 import datetime as dt
 import json
@@ -38,7 +38,6 @@ CLIENT_SECRET = get_env_str("CTRADER_CLIENT_SECRET", "CLIENT_SECRET", "CTRADER_S
 ACCESS_TOKEN = get_env_str("CTRADER_ACCESS_TOKEN", "ACCESS_TOKEN", "CTRADER_TOKEN", "TOKEN")
 ACCOUNT_ID = get_env_int("ACCOUNT_ID", "CTRADER_ACCOUNT_ID", "CTID_TRADER_ACCOUNT_ID", default=0)
 SYMBOL_ID = get_env_int("SYMBOL_ID", "CTRADER_SYMBOL_ID", default=1287)  # US30 Symbol ID = 1287
-EXPECTED_SYMBOL = get_env_str("CTRADER_EXPECTED_SYMBOL", default="US30").upper()
 CTRADER_ENV = get_env_str("CTRADER_ENV", "CTRADER_ACCOUNT_ENV", default="live").lower()
 DATA_DIR = Path(get_env_str("DATA_DIR", default="."))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -144,7 +143,7 @@ def on_app_auth(_result):
 
 
 def on_account_auth(_result):
-    print(f"cTrader account authenticated. Requesting live spot & M5 bars for Symbol ID {SYMBOL_ID}...")
+    print(f"cTrader account authenticated. Requesting latest 36h M5 bars & live spot for Symbol ID {SYMBOL_ID}...")
     start_market_data_requests()
 
 
@@ -192,8 +191,17 @@ def on_trendbars(result):
         print("⚠️ WARNING: No M5 bars returned by cTrader.")
 
     m5_done = True
+
+    # Subscribe to live spot tick right after M5 bars arrive
     if not quote_done and not shutting_down:
-        spot_wait_call = reactor.callLater(6.0, on_spot_wait_timeout)
+        spot_req = ProtoOASubscribeSpotsReq()
+        spot_req.ctidTraderAccountId = ACCOUNT_ID
+        spot_req.symbolId.append(SYMBOL_ID)
+        spot_req.subscribeToSpotTimestamp = True
+        d_spot = client.send(spot_req, responseTimeoutInSeconds=15)
+        d_spot.addErrback(on_fatal_error)
+        spot_wait_call = reactor.callLater(5.0, on_spot_wait_timeout)
+
     maybe_finish()
     return result
 
@@ -202,20 +210,12 @@ def start_market_data_requests():
     now = utc_now()
     now_ms = int(now.timestamp() * 1000)
 
-    # 1. Subscribe to live spot events for instant BID/ASK quote
-    spot_req = ProtoOASubscribeSpotsReq()
-    spot_req.ctidTraderAccountId = ACCOUNT_ID
-    spot_req.symbolId.append(SYMBOL_ID)
-    spot_req.subscribeToSpotTimestamp = True
-    d_spot = client.send(spot_req, responseTimeoutInSeconds=20)
-    d_spot.addErrback(on_fatal_error)
-
-    # 2. Request latest 5 days of M5 candles (NO bar_req.count cap so newest bars are never truncated!)
+    # Request last 36 hours (~432 M5 bars) so cTrader NEVER hits its 1,000-bar truncation ceiling!
     bar_req = ProtoOAGetTrendbarsReq()
     bar_req.ctidTraderAccountId = ACCOUNT_ID
     bar_req.symbolId = SYMBOL_ID
     bar_req.period = ProtoOATrendbarPeriod.M5
-    bar_req.fromTimestamp = int((now - dt.timedelta(days=5)).timestamp() * 1000)
+    bar_req.fromTimestamp = int((now - dt.timedelta(hours=36)).timestamp() * 1000)
     bar_req.toTimestamp = now_ms
 
     d_bars = client.send(bar_req, responseTimeoutInSeconds=20)
@@ -249,7 +249,6 @@ def on_message_received(_client, message):
     bid = scale_val(bid_raw)
     ask = scale_val(ask_raw)
 
-    # Strictly require a live BID or ASK tick (never use stale sessionClose!)
     if bid is not None and ask is not None:
         current_price, price_basis = round((bid + ask) / 2.0, PRICE_DIGITS), "mid_bid_ask"
     elif bid is not None:
@@ -257,7 +256,6 @@ def on_message_received(_client, message):
     elif ask is not None:
         current_price, price_basis = ask, "ask"
     else:
-        # Ignore initial snapshot packet that only carries yesterday's sessionClose
         return
 
     payload = {
