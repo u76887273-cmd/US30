@@ -37,13 +37,12 @@ CLIENT_ID = get_env_str("CTRADER_CLIENT_ID", "CLIENT_ID", "CTRADER_ID", "APP_CLI
 CLIENT_SECRET = get_env_str("CTRADER_CLIENT_SECRET", "CLIENT_SECRET", "CTRADER_SECRET", "APP_CLIENT_SECRET")
 ACCESS_TOKEN = get_env_str("CTRADER_ACCESS_TOKEN", "ACCESS_TOKEN", "CTRADER_TOKEN", "TOKEN")
 ACCOUNT_ID = get_env_int("ACCOUNT_ID", "CTRADER_ACCOUNT_ID", "CTID_TRADER_ACCOUNT_ID", default=0)
-SYMBOL_ID = get_env_int("SYMBOL_ID", "CTRADER_SYMBOL_ID", default=0)
+SYMBOL_ID = get_env_int("SYMBOL_ID", "CTRADER_SYMBOL_ID", default=1287)  # US30 Symbol ID = 1287
 EXPECTED_SYMBOL = get_env_str("CTRADER_EXPECTED_SYMBOL", default="US30").upper()
 CTRADER_ENV = get_env_str("CTRADER_ENV", "CTRADER_ACCOUNT_ENV", default="live").lower()
 DATA_DIR = Path(get_env_str("DATA_DIR", default="."))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-PRICE_SCALE = 100000.0
 PRICE_DIGITS = get_env_int("CTRADER_PRICE_DIGITS", default=2)
 CTRADER_HOST = EndPoints.PROTOBUF_DEMO_HOST if CTRADER_ENV == "demo" else EndPoints.PROTOBUF_LIVE_HOST
 
@@ -136,10 +135,11 @@ def on_account_auth(_result):
 
 def trendbar_to_row(bar):
     low_raw = int(bar.low)
-    low = low_raw / PRICE_SCALE
-    open_price = (low_raw + int(bar.deltaOpen)) / PRICE_SCALE
-    close_price = (low_raw + int(bar.deltaClose)) / PRICE_SCALE
-    high_price = (low_raw + int(bar.deltaHigh)) / PRICE_SCALE
+    scale = 100000.0 if low_raw > 100000000 else 100.0
+    low = low_raw / scale
+    open_price = (low_raw + int(bar.deltaOpen)) / scale
+    close_price = (low_raw + int(bar.deltaClose)) / scale
+    high_price = (low_raw + int(bar.deltaHigh)) / scale
     timestamp = dt.datetime.fromtimestamp(
         int(bar.utcTimestampInMinutes) * 60, tz=dt.timezone.utc
     )
@@ -229,7 +229,8 @@ def on_message_received(_client, message):
     def scale_val(raw):
         if raw <= 0:
             return None
-        return round(raw / PRICE_SCALE, PRICE_DIGITS)
+        scale = 100000.0 if raw > 100000000 else 100.0
+        return round(raw / scale, PRICE_DIGITS)
 
     bid = scale_val(bid_raw)
     ask = scale_val(ask_raw)
