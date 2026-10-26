@@ -6,14 +6,13 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 
 DB_URL = os.environ.get("DATABASE_URL")
-TABLE_NAME = "m5_bars"
+TABLE_NAME = "features_m5"  # Matches your existing US30 Supabase table
 
 HORIZONS = {
-    "30m": 6,   # 6 x 5-min bars = 30 Minutes
-    "4h":  48   # 48 x 5-min bars = 4 Hours
+    "30m": 6,   # 6 x 5-min bars = 30 Minutes (scale = 1)
+    "4h":  48   # 48 x 5-min bars = 4 Hours   (scale = 8)
 }
 
-# Upgraded 9-Feature Vector (includes Price-to-EMA Stretch & Cyclical Session Time)
 FEATURES = [
     "ema_diff",
     "ema_stretch",
@@ -23,7 +22,7 @@ FEATURES = [
     "ret_long",
     "vol_ratio",
     "hour_sin",
-    "hour_cos"
+    "hour_cos",
 ]
 
 def parse_mixed_timestamps(series):
@@ -32,9 +31,30 @@ def parse_mixed_timestamps(series):
     except Exception:
         return pd.to_datetime(series, format="mixed", utc=True, errors="coerce")
 
+def ensure_unique_timestamp_constraint(conn):
+    """Deduplicates features_m5 in Supabase and ensures a UNIQUE index on timestamp exists."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+                    timestamp TIMESTAMPTZ NOT NULL,
+                    open DOUBLE PRECISION,
+                    high DOUBLE PRECISION,
+                    low DOUBLE PRECISION,
+                    close DOUBLE PRECISION,
+                    volume DOUBLE PRECISION
+                );
+                DELETE FROM {TABLE_NAME} a USING {TABLE_NAME} b
+                WHERE a.ctid < b.ctid AND a.timestamp = b.timestamp;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_{TABLE_NAME}_timestamp ON {TABLE_NAME} (timestamp);
+            """)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"Note on index maintenance: {e}")
+
 def sync_and_load_all_m5_bars():
     if not DB_URL:
-        print("⚠️ DATABASE_URL not set. Falling back to local data_m5.csv...")
         if not os.path.exists("data_m5.csv"):
             raise FileNotFoundError("Neither DATABASE_URL nor data_m5.csv is available.")
         df = pd.read_csv("data_m5.csv")
@@ -42,6 +62,7 @@ def sync_and_load_all_m5_bars():
         return df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
     with psycopg.connect(DB_URL) as conn:
+        ensure_unique_timestamp_constraint(conn)
         with conn.cursor() as cur:
             cur.execute(f"SELECT timestamp, open, high, low, close, volume FROM {TABLE_NAME};")
             rows = cur.fetchall()
@@ -64,7 +85,7 @@ def sync_and_load_all_m5_bars():
                 new_bars = local_df[~local_df["timestamp"].isin(existing_ts)].copy()
 
                 if not new_bars.empty:
-                    print(f"🔄 Found {len(new_bars):,} new 5m bars in data_m5.csv! Inserting into Supabase '{TABLE_NAME}'...")
+                    print(f"🔄 Found {len(new_bars):,} new closed 5m bars in data_m5.csv! Syncing to '{TABLE_NAME}'...")
                     with psycopg.connect(DB_URL) as conn:
                         with conn.cursor() as cur:
                             insert_data = [
@@ -82,7 +103,11 @@ def sync_and_load_all_m5_bars():
                                 f"""
                                 INSERT INTO {TABLE_NAME} (timestamp, open, high, low, close, volume)
                                 VALUES (%s, %s, %s, %s, %s, %s)
-                                ON CONFLICT DO NOTHING;
+                                ON CONFLICT (timestamp) DO UPDATE SET
+                                    high = GREATEST({TABLE_NAME}.high, EXCLUDED.high),
+                                    low = LEAST({TABLE_NAME}.low, EXCLUDED.low),
+                                    close = EXCLUDED.close,
+                                    volume = EXCLUDED.volume;
                                 """,
                                 insert_data
                             )
@@ -93,6 +118,7 @@ def sync_and_load_all_m5_bars():
 
     for col in ["open", "high", "low", "close", "volume"]:
         db_df[col] = pd.to_numeric(db_df[col], errors="coerce")
+    db_df["volume"] = db_df["volume"].fillna(0.0)
 
     db_df = (
         db_df.dropna(subset=["timestamp", "open", "high", "low", "close"])
@@ -102,8 +128,9 @@ def sync_and_load_all_m5_bars():
     )
 
     db_df.to_csv("data_m5.csv", index=False)
+
     print("=" * 70)
-    print(f"✅ FULL DATASET READY FOR TRAINING ('{TABLE_NAME}')")
+    print(f"✅ FULL US30 DATASET READY FOR TRAINING ('{TABLE_NAME}')")
     print(f"   Total Raw Rows Loaded : {raw_db_count:,}")
     print(f"   Clean Unique M5 Bars  : {len(db_df):,}")
     print(f"   Start Timestamp       : {db_df['timestamp'].iloc[0]}")
@@ -114,36 +141,41 @@ def sync_and_load_all_m5_bars():
 
 def build_features(df, tf_name="30m"):
     df = df.copy()
+    # Synchronized with 6-bar (30m -> scale=1) and 48-bar (4h -> scale=8) horizons
     scale = 1 if tf_name == "30m" else 8
 
     df["ema_fast"] = df["close"].ewm(span=20 * scale, adjust=False).mean()
     df["ema_slow"] = df["close"].ewm(span=50 * scale, adjust=False).mean()
     df["ema_diff"] = df["ema_fast"] - df["ema_slow"]
 
+    # Timeframe-specific Wilder's ATR
     high_low = df["high"] - df["low"]
     high_close = (df["high"] - df["close"].shift(1)).abs()
     low_close = (df["low"] - df["close"].shift(1)).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df["atr"] = tr.ewm(alpha=1.0 / (14 * scale), adjust=False).mean()
 
+    # Rubber-band stretch of price from structural EMA (normalized by ATR)
     df["ema_stretch"] = (df["close"] - df["ema_fast"]) / (df["atr"] + 1e-5)
 
+    # True Wilder's EWM RSI
     delta = df["close"].diff(1)
-    gain = delta.clip(lower=0.0)
-    loss = -delta.clip(upper=0.0)
-    avg_gain = gain.ewm(alpha=1.0 / (14 * scale), min_periods=14 * scale, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1.0 / (14 * scale), min_periods=14 * scale, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-9)
+    gain = delta.clip(lower=0.0).ewm(alpha=1.0 / (14 * scale), min_periods=14 * scale, adjust=False).mean()
+    loss = (-delta.clip(upper=0.0)).ewm(alpha=1.0 / (14 * scale), min_periods=14 * scale, adjust=False).mean()
+    rs = gain / (loss + 1e-9)
     df["rsi"] = 100.0 - (100.0 / (1.0 + rs))
 
+    # Momentum & Volume
     df["ret_short"] = df["close"].pct_change(3 * scale)
     df["ret_long"] = df["close"].pct_change(12 * scale)
-    df["vol_ratio"] = df["volume"] / (df["volume"].rolling(20 * scale).mean() + 1e-5)
+    vol_ma = df["volume"].rolling(20 * scale, min_periods=1).mean()
+    df["vol_ratio"] = df["volume"] / (vol_ma + 1.0)
 
+    # Cyclical UTC Session Time (captures NY Open vs London/Asian Sessions)
     ts_utc = parse_mixed_timestamps(df["timestamp"])
-    fractional_hour = ts_utc.dt.hour + (ts_utc.dt.minute / 60.0)
-    df["hour_sin"] = np.sin(2.0 * np.pi * fractional_hour / 24.0)
-    df["hour_cos"] = np.cos(2.0 * np.pi * fractional_hour / 24.0)
+    utc_hour = ts_utc.dt.hour + (ts_utc.dt.minute / 60.0)
+    df["hour_sin"] = np.sin(2.0 * np.pi * utc_hour / 24.0)
+    df["hour_cos"] = np.cos(2.0 * np.pi * utc_hour / 24.0)
 
     return df
 
@@ -154,35 +186,29 @@ def train_horizon(raw_df, tf_name, horizon_bars):
     future_high = df["high"].shift(-1).rolling(window=indexer).max()
     future_low = df["low"].shift(-1).rolling(window=indexer).min()
 
-    df["target_up"] = (future_high - df["ema_fast"]).clip(lower=1.0)
-    df["target_down"] = (df["ema_fast"] - future_low).clip(lower=1.0)
+    # Unclipped signed excursions from ema_fast so strong trends are not distorted
+    df["target_up"] = future_high - df["ema_fast"]
+    df["target_down"] = df["ema_fast"] - future_low
 
-    df_clean = df.dropna(subset=FEATURES + ["target_up", "target_down"]).reset_index(drop=True)
-    X = df_clean[FEATURES]
+    # Exclude trailing horizon_bars rows where forward window is incomplete
+    df_valid = df.iloc[:-horizon_bars].dropna(subset=FEATURES + ["target_up", "target_down"]).reset_index(drop=True)
+    X = df_valid[FEATURES]
 
     model_up = RandomForestRegressor(
-        n_estimators=150,
-        max_depth=10,
-        min_samples_leaf=25,
-        random_state=42,
-        n_jobs=-1
+        n_estimators=150, max_depth=10, min_samples_leaf=25, random_state=42, n_jobs=-1
     )
     model_down = RandomForestRegressor(
-        n_estimators=150,
-        max_depth=10,
-        min_samples_leaf=25,
-        random_state=42,
-        n_jobs=-1
+        n_estimators=150, max_depth=10, min_samples_leaf=25, random_state=42, n_jobs=-1
     )
 
-    model_up.fit(X, df_clean["target_up"])
-    model_down.fit(X, df_clean["target_down"])
+    model_up.fit(X, df_valid["target_up"])
+    model_down.fit(X, df_valid["target_down"])
 
     joblib.dump({"up": model_up, "down": model_down}, f"model_{tf_name}.pkl")
     print(
-        f"[{tf_name.upper()}] Trained Upside/Downside Regressors on {len(X):,} bars "
-        f"({df_clean['timestamp'].iloc[0]} --> {df_clean['timestamp'].iloc[-1]} | "
-        f"Latest {tf_name.upper()} RSI: {df_clean['rsi'].iloc[-1]:.1f})"
+        f"[{tf_name.upper()}] Trained Anchored US30 Regressors on {len(X):,} bars "
+        f"({df_valid['timestamp'].iloc[0]} --> {df_valid['timestamp'].iloc[-1]} | "
+        f"Latest {tf_name.upper()} RSI: {df['rsi'].iloc[-1]:.1f})"
     )
 
 if __name__ == "__main__":
