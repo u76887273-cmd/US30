@@ -2,8 +2,11 @@ name: US30 Quantum Live Engine (30M and 4H)
 
 on:
   schedule:
+    # 1. Sunday 21:00–23:45 UTC (Reopen window + DST buffer)
     - cron: '*/15 21-23 * * 0'
+    # 2. Monday through Thursday (All day, every 15 mins)
     - cron: '*/15 * * * 1-4'
+    # 3. Friday 00:00–22:45 UTC (Stops after Friday close for the entire weekend)
     - cron: '*/15 0-22 * * 5'
   workflow_dispatch:
     inputs:
@@ -33,8 +36,6 @@ jobs:
       ACCOUNT_ID: ${{ secrets.ACCOUNT_ID || secrets.CTRADER_ACCOUNT_ID || vars.ACCOUNT_ID }}
       CTRADER_ACCOUNT_ID: ${{ secrets.CTRADER_ACCOUNT_ID || secrets.ACCOUNT_ID || vars.CTRADER_ACCOUNT_ID }}
       SYMBOL_ID: ${{ secrets.SYMBOL_ID || secrets.CTRADER_SYMBOL_ID || vars.SYMBOL_ID || '1287' }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
       - name: Checkout Repository
@@ -43,7 +44,7 @@ jobs:
       - name: Sync Root and src Script Locations
         run: |
           mkdir -p src
-          for script in data.py train.py predict.py validator.py; do
+          for script in data.py train.py predict.py; do
             if [ -f "$script" ] && [ -f "src/$script" ]; then
               if [ "$script" -nt "src/$script" ]; then
                 cp "$script" "src/$script"
@@ -106,6 +107,3 @@ jobs:
 
       - name: 3. Run AI Prediction Engine
         run: python src/predict.py
-
-      - name: 4. Run Grid State Validator
-        run: python src/validator.py
