@@ -143,7 +143,7 @@ def on_app_auth(_result):
 
 
 def on_account_auth(_result):
-    print(f"cTrader account authenticated. Requesting latest M5 bars & live spot for Symbol ID {SYMBOL_ID}...")
+    print(f"cTrader account authenticated. Requesting latest M5 bars & live spot for US30 (Symbol ID {SYMBOL_ID})...")
     start_market_data_requests()
 
 
@@ -209,7 +209,6 @@ def start_market_data_requests():
     now = utc_now()
     now_ms = int(now.timestamp() * 1000)
 
-    # 36 hours on Tue-Fri (~432 bars), or 84 hours on Sun/Mon to bridge the 49-hour weekend gap without exceeding 1,000 bars
     lookback_hours = 84 if now.weekday() in (6, 0) else 36
 
     bar_req = ProtoOAGetTrendbarsReq()
@@ -284,17 +283,19 @@ def disconnected(_client, _reason):
 
 
 if __name__ == "__main__":
+    print(f"DEBUG -> CLIENT_ID loaded: {bool(CLIENT_ID)}, ACCOUNT_ID: {ACCOUNT_ID}, SYMBOL_ID: {SYMBOL_ID}")
+
     missing = [
-        name for name, value in [
-            ("CTRADER_CLIENT_ID", CLIENT_ID),
-            ("CTRADER_CLIENT_SECRET", CLIENT_SECRET),
-            ("CTRADER_ACCESS_TOKEN", ACCESS_TOKEN),
+        name for name, val in [
+            ("CLIENT_ID", CLIENT_ID),
+            ("CLIENT_SECRET", CLIENT_SECRET),
+            ("ACCESS_TOKEN", ACCESS_TOKEN),
             ("ACCOUNT_ID", ACCOUNT_ID),
             ("SYMBOL_ID", SYMBOL_ID),
-        ] if not value
+        ] if not val or val == 0 or str(val).strip() == ""
     ]
     if missing:
-        print("⚠️ Notice: Missing environment variable(s): " + ", ".join(missing))
+        print(f"⚠️ Notice: Missing or empty environment variable(s): {', '.join(missing)}")
         sys.exit(0)
 
     write_json_atomic(
