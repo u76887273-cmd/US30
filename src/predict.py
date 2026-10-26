@@ -2,6 +2,8 @@ import os
 import sys
 import json
 import datetime
+import urllib.request
+import urllib.parse
 import joblib
 import psycopg
 import pandas as pd
@@ -11,7 +13,6 @@ from train import (
     build_features,
     train_horizon,
     sync_and_load_all_m5_bars,
-    format_db_timestamp,
     FEATURES,
     HORIZONS,
     ensure_unique_timestamp_constraint,
@@ -46,7 +47,7 @@ def get_live_spot_quote():
     return None
 
 def sync_recent_bars_and_load_warmup(conn):
-    """Syncs pure closed M5 bars into Supabase using uniform 'YYYY-MM-DD HH:MM:SS' format."""
+    """Syncs pure closed M5 bars into Supabase without overwriting them with mid-bar live spot ticks."""
     ensure_unique_timestamp_constraint(conn)
     local_df = pd.DataFrame()
     if os.path.exists("data_m5.csv"):
@@ -64,7 +65,7 @@ def sync_recent_bars_and_load_warmup(conn):
                 with conn.cursor() as cur:
                     insert_data = [
                         (
-                            format_db_timestamp(row["timestamp"]),
+                            row["timestamp"].isoformat(),
                             float(row["open"]),
                             float(row["high"]),
                             float(row["low"]),
@@ -93,11 +94,10 @@ def sync_recent_bars_and_load_warmup(conn):
     db_df = pd.DataFrame()
     try:
         with conn.cursor() as cur:
-            # Cast to timestamptz in ORDER BY so mixed string formats in m5_bars always sort chronologically
             cur.execute(f"""
                 SELECT timestamp, open, high, low, close, volume
                 FROM {RAW_BARS_TABLE}
-                ORDER BY timestamp::timestamptz DESC
+                ORDER BY timestamp DESC
                 LIMIT 1500;
             """)
             rows = cur.fetchall()
@@ -142,6 +142,31 @@ def init_db_table(conn, table_name):
             GRANT SELECT ON {table_name} TO anon, authenticated;
         """)
     conn.commit()
+
+def send_telegram_alert(tf, signal, price_0d, entry_zone, eq_0d, rsi, stretch_pct):
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not (bot_token and chat_id and signal in ["BUY", "SELL"]):
+        return
+
+    icon = "🟢" if signal == "BUY" else "🔴"
+    msg = (
+        f"🦅 *US30 QUANTUM ({tf.upper()})*\n"
+        f"========================\n"
+        f"{icon} *SIGNAL: {signal}*\n"
+        f"💰 *Live Price:* {price_0d:.0f}\n"
+        f"🏁 *Equilibrium TP:* {eq_0d:.0f}\n"
+        f"📍 *Limit Tiers:* {entry_zone}\n"
+        f"📊 *Stretch:* {stretch_pct:.1f}% | *RSI:* {rsi:.1f}"
+    )
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        data = urllib.parse.urlencode({"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}).encode("utf-8")
+        req = urllib.request.Request(url, data=data)
+        urllib.request.urlopen(req, timeout=10)
+        print(f"[{tf.upper()}] Telegram alert sent!")
+    except Exception as e:
+        print(f"[{tf.upper()}] Telegram alert note: {e}")
 
 def predict_for_timeframe(conn, raw_df, tf, live_spot):
     model_path = f"model_{tf}.pkl"
@@ -238,6 +263,8 @@ def predict_for_timeframe(conn, raw_df, tf, live_spot):
         f"Buy(0.55/0.8/1.0): {b_055:.0f}/{b_080:.0f}/{b_100:.0f} | "
         f"Sell(0.55/0.8/1.0): {s_055:.0f}/{s_080:.0f}/{s_100:.0f} | EQ/TP: {eq_0d:.0f} | Stretch: {stretch_pct:.1f}%"
     )
+
+    send_telegram_alert(tf, signal, price_0d, entry_zone, eq_0d, rsi, stretch_pct)
 
 if __name__ == "__main__":
     live_spot = get_live_spot_quote()
