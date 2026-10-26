@@ -6,7 +6,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 
 DB_URL = os.environ.get("DATABASE_URL")
-TABLE_NAME = "features_m5"  # Matches your existing US30 Supabase table
+TABLE_NAME = "m5_bars"  # Matches your existing US30 Supabase table
 
 HORIZONS = {
     "30m": 6,   # 6 x 5-min bars = 30 Minutes (scale = 1)
@@ -32,7 +32,7 @@ def parse_mixed_timestamps(series):
         return pd.to_datetime(series, format="mixed", utc=True, errors="coerce")
 
 def ensure_unique_timestamp_constraint(conn):
-    """Deduplicates features_m5 in Supabase and ensures a UNIQUE index on timestamp exists."""
+    """Deduplicates m5_bars in Supabase and ensures a UNIQUE index on timestamp exists."""
     try:
         with conn.cursor() as cur:
             cur.execute(f"""
@@ -133,8 +133,9 @@ def sync_and_load_all_m5_bars():
     print(f"✅ FULL US30 DATASET READY FOR TRAINING ('{TABLE_NAME}')")
     print(f"   Total Raw Rows Loaded : {raw_db_count:,}")
     print(f"   Clean Unique M5 Bars  : {len(db_df):,}")
-    print(f"   Start Timestamp       : {db_df['timestamp'].iloc[0]}")
-    print(f"   Latest Timestamp      : {db_df['timestamp'].iloc[-1]}")
+    if not db_df.empty:
+        print(f"   Start Timestamp       : {db_df['timestamp'].iloc[0]}")
+        print(f"   Latest Timestamp      : {db_df['timestamp'].iloc[-1]}")
     print("=" * 70)
 
     return db_df
@@ -171,7 +172,7 @@ def build_features(df, tf_name="30m"):
     vol_ma = df["volume"].rolling(20 * scale, min_periods=1).mean()
     df["vol_ratio"] = df["volume"] / (vol_ma + 1.0)
 
-    # Cyclical UTC Session Time (captures NY Open vs London/Asian Sessions)
+    # Cyclical UTC Session Time
     ts_utc = parse_mixed_timestamps(df["timestamp"])
     utc_hour = ts_utc.dt.hour + (ts_utc.dt.minute / 60.0)
     df["hour_sin"] = np.sin(2.0 * np.pi * utc_hour / 24.0)
