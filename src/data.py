@@ -36,8 +36,9 @@ def get_env_int(*keys, default=0):
 CLIENT_ID = get_env_str("CTRADER_CLIENT_ID", "CLIENT_ID", "CTRADER_ID", "APP_CLIENT_ID")
 CLIENT_SECRET = get_env_str("CTRADER_CLIENT_SECRET", "CLIENT_SECRET", "CTRADER_SECRET", "APP_CLIENT_SECRET")
 ACCESS_TOKEN = get_env_str("CTRADER_ACCESS_TOKEN", "ACCESS_TOKEN", "CTRADER_TOKEN", "TOKEN")
-ACCOUNT_ID = get_env_int("CTRADER_ACCOUNT_ID", "ACCOUNT_ID", "CTID_TRADER_ACCOUNT_ID", default=0)
-SYMBOL_ID = get_env_int("SYMBOL_ID", "CTRADER_SYMBOL_ID", default=1287)  # US30 Symbol ID = 1287
+ACCOUNT_ID = get_env_int("ACCOUNT_ID", "CTRADER_ACCOUNT_ID", "CTID_TRADER_ACCOUNT_ID", default=0)
+SYMBOL_ID = get_env_int("SYMBOL_ID", "CTRADER_SYMBOL_ID", default=0)
+EXPECTED_SYMBOL = get_env_str("CTRADER_EXPECTED_SYMBOL", default="US30").upper()
 CTRADER_ENV = get_env_str("CTRADER_ENV", "CTRADER_ACCOUNT_ENV", default="live").lower()
 DATA_DIR = Path(get_env_str("DATA_DIR", default="."))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -48,11 +49,11 @@ CTRADER_HOST = EndPoints.PROTOBUF_DEMO_HOST if CTRADER_ENV == "demo" else EndPoi
 
 client = Client(CTRADER_HOST, EndPoints.PROTOBUF_PORT, TcpProtocol)
 timeout_call = None
+spot_wait_call = None
 symbol_name = "#US30"
 m5_done = False
 quote_done = False
 shutting_down = False
-latest_spot_bid = None
 
 
 def utc_now():
@@ -70,33 +71,13 @@ def write_json_atomic(path: Path, payload: dict):
     os.replace(temp_path, path)
 
 
-def inject_live_spot_into_m5():
-    """Updates the latest M5 candle with the real-time cTrader spot BID."""
-    m5_path = DATA_DIR / "data_m5.csv"
-    if latest_spot_bid is None or not m5_path.exists():
-        return
-    try:
-        df = pd.read_csv(m5_path)
-        if df.empty:
-            return
-        last_idx = df.index[-1]
-        spot_val = round(float(latest_spot_bid), PRICE_DIGITS)
-        df.loc[last_idx, "close"] = spot_val
-        if spot_val > float(df.loc[last_idx, "high"]):
-            df.loc[last_idx, "high"] = spot_val
-        if spot_val < float(df.loc[last_idx, "low"]):
-            df.loc[last_idx, "low"] = spot_val
-        df.to_csv(m5_path, index=False)
-        print(f"⚡ Synced live US30 spot BID ({spot_val:.{PRICE_DIGITS}f}) into latest M5 bar close.")
-    except Exception as e:
-        print(f"Note on syncing spot into M5 CSV: {e}")
-
-
 def stop_reactor_safely():
-    global timeout_call, shutting_down
+    global timeout_call, spot_wait_call, shutting_down
     shutting_down = True
     if timeout_call is not None and timeout_call.active():
         timeout_call.cancel()
+    if spot_wait_call is not None and spot_wait_call.active():
+        spot_wait_call.cancel()
     try:
         client.stopService()
     except Exception:
@@ -107,15 +88,19 @@ def stop_reactor_safely():
 
 def maybe_finish():
     if m5_done and quote_done and not shutting_down:
-        inject_live_spot_into_m5()
-        print("✅ US30 M5 bars and live cTrader spot price synced cleanly.")
+        print("✅ US30 closed M5 bars and live cTrader spot quote synced cleanly.")
+        stop_reactor_safely()
+
+
+def on_spot_wait_timeout():
+    if not shutting_down and m5_done and not quote_done:
+        print("ℹ️ No new spot tick arrived within 6s of M5 fetch. Using latest M5 bar close as fallback.")
         stop_reactor_safely()
 
 
 def on_timeout():
     if not shutting_down:
-        print("⚠️ WARNING: cTrader fetch timed out after 40 seconds. Proceeding with available data.")
-        inject_live_spot_into_m5()
+        print("⚠️ WARNING: cTrader fetch timed out after 35 seconds. Proceeding with available data.")
         stop_reactor_safely()
 
 
@@ -151,11 +136,10 @@ def on_account_auth(_result):
 
 def trendbar_to_row(bar):
     low_raw = int(bar.low)
-    scale = PRICE_SCALE if low_raw > 10000000 else 100.0
-    low = low_raw / scale
-    open_price = (low_raw + int(bar.deltaOpen)) / scale
-    close_price = (low_raw + int(bar.deltaClose)) / scale
-    high_price = (low_raw + int(bar.deltaHigh)) / scale
+    low = low_raw / PRICE_SCALE
+    open_price = (low_raw + int(bar.deltaOpen)) / PRICE_SCALE
+    close_price = (low_raw + int(bar.deltaClose)) / PRICE_SCALE
+    high_price = (low_raw + int(bar.deltaHigh)) / PRICE_SCALE
     timestamp = dt.datetime.fromtimestamp(
         int(bar.utcTimestampInMinutes) * 60, tz=dt.timezone.utc
     )
@@ -170,7 +154,7 @@ def trendbar_to_row(bar):
 
 
 def on_trendbars(result):
-    global m5_done
+    global m5_done, spot_wait_call
     response = Protobuf.extract(result)
     rows = [trendbar_to_row(bar) for bar in response.trendbar]
     path = DATA_DIR / "data_m5.csv"
@@ -184,14 +168,16 @@ def on_trendbars(result):
         )
         df.to_csv(path, index=False)
         print(
-            f"[M5] Saved {len(df):,} real US30 M5 bars. "
-            f"Latest bar open: {df['timestamp'].iloc[-1]} | "
-            f"bar close: {df['close'].iloc[-1]:.{PRICE_DIGITS}f}"
+            f"[M5] Saved {len(df):,} pure closed M5 bars. "
+            f"Latest bar: {df['timestamp'].iloc[-1]} | "
+            f"Close: {df['close'].iloc[-1]:.{PRICE_DIGITS}f}"
         )
     else:
         print("⚠️ WARNING: No M5 bars returned by cTrader.")
 
     m5_done = True
+    if not quote_done and not shutting_down:
+        spot_wait_call = reactor.callLater(6.0, on_spot_wait_timeout)
     maybe_finish()
     return result
 
@@ -208,14 +194,14 @@ def start_market_data_requests():
     d_spot = client.send(spot_req, responseTimeoutInSeconds=20)
     d_spot.addErrback(on_fatal_error)
 
-    # 2. Request latest 3 days (~864 bars) of M5 candles with explicit count
+    # 2. Request latest 5 days (~1,440 bars) of M5 candles
     bar_req = ProtoOAGetTrendbarsReq()
     bar_req.ctidTraderAccountId = ACCOUNT_ID
     bar_req.symbolId = SYMBOL_ID
     bar_req.period = ProtoOATrendbarPeriod.M5
-    bar_req.fromTimestamp = int((now - dt.timedelta(days=3)).timestamp() * 1000)
+    bar_req.fromTimestamp = int((now - dt.timedelta(days=5)).timestamp() * 1000)
     bar_req.toTimestamp = now_ms
-    bar_req.count = 1500
+    bar_req.count = 1800
 
     d_bars = client.send(bar_req, responseTimeoutInSeconds=20)
     d_bars.addCallback(on_trendbars)
@@ -223,7 +209,7 @@ def start_market_data_requests():
 
 
 def on_message_received(_client, message):
-    global quote_done, latest_spot_bid
+    global quote_done
     if shutting_down:
         return
     try:
@@ -243,8 +229,7 @@ def on_message_received(_client, message):
     def scale_val(raw):
         if raw <= 0:
             return None
-        s = PRICE_SCALE if raw > 10000000 else 100.0
-        return round(raw / s, PRICE_DIGITS)
+        return round(raw / PRICE_SCALE, PRICE_DIGITS)
 
     bid = scale_val(bid_raw)
     ask = scale_val(ask_raw)
@@ -259,7 +244,6 @@ def on_message_received(_client, message):
     else:
         return
 
-    latest_spot_bid = current_price
     payload = {
         "status": "QUOTE_RECEIVED",
         "symbol": symbol_name,
@@ -309,7 +293,7 @@ if __name__ == "__main__":
         },
     )
 
-    timeout_call = reactor.callLater(40, on_timeout)
+    timeout_call = reactor.callLater(35, on_timeout)
     client.setConnectedCallback(connected)
     client.setDisconnectedCallback(disconnected)
     client.setMessageReceivedCallback(on_message_received)
