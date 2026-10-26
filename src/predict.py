@@ -1,13 +1,25 @@
 import os
+import sys
 import json
 import datetime
+import urllib.request
+import urllib.parse
 import joblib
 import psycopg
 import pandas as pd
-from train import build_features, train_horizon, FEATURES, HORIZONS
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from train import (
+    build_features,
+    train_horizon,
+    sync_and_load_all_m5_bars,
+    FEATURES,
+    HORIZONS,
+    ensure_unique_timestamp_constraint,
+)
 
 DB_URL = os.environ.get("DATABASE_URL")
-RAW_BARS_TABLE = "m5_bars"
+RAW_BARS_TABLE = "features_m5"  # Matches your existing US30 Supabase table
 
 TABLES = {
     "30m": "supreme_grid_log",
@@ -21,7 +33,7 @@ def parse_mixed_timestamps(series):
         return pd.to_datetime(series, format="mixed", utc=True, errors="coerce")
 
 def get_live_spot_quote():
-    """Reads latest_quote.json produced by data.py if a fresh cTrader spot quote was received."""
+    """Reads latest_quote.json produced by data.py if a fresh quote was received."""
     if os.path.exists("latest_quote.json"):
         try:
             with open("latest_quote.json", "r", encoding="utf-8") as f:
@@ -34,7 +46,9 @@ def get_live_spot_quote():
             print(f"Note reading latest_quote.json: {e}")
     return None
 
-def sync_recent_bars_and_load_warmup(conn, live_spot):
+def sync_recent_bars_and_load_warmup(conn):
+    """Syncs pure closed M5 bars into Supabase without overwriting them with mid-bar live spot ticks."""
+    ensure_unique_timestamp_constraint(conn)
     local_df = pd.DataFrame()
     if os.path.exists("data_m5.csv"):
         try:
@@ -45,22 +59,10 @@ def sync_recent_bars_and_load_warmup(conn, live_spot):
                 for col in ["open", "high", "low", "close"]:
                     local_df[col] = pd.to_numeric(local_df[col], errors="coerce")
                 local_df["volume"] = pd.to_numeric(local_df.get("volume", 0.0), errors="coerce").fillna(0.0)
-
                 local_df = local_df.dropna(subset=["timestamp", "open", "high", "low", "close"]).sort_values("timestamp")
 
-                if live_spot is not None and not local_df.empty:
-                    idx = local_df.index[-1]
-                    local_df.loc[idx, "close"] = live_spot
-                    if live_spot > float(local_df.loc[idx, "high"]):
-                        local_df.loc[idx, "high"] = live_spot
-                    if live_spot < float(local_df.loc[idx, "low"]):
-                        local_df.loc[idx, "low"] = live_spot
-
-                recent_slice = local_df.tail(500)
+                recent_slice = local_df.tail(250)
                 with conn.cursor() as cur:
-                    # Delete overlapping recent timestamps first so updated closes always overwrite stale rows
-                    min_recent_ts = recent_slice["timestamp"].iloc[0].isoformat()
-                    cur.execute(f"DELETE FROM {RAW_BARS_TABLE} WHERE timestamp >= %s;", (min_recent_ts,))
                     insert_data = [
                         (
                             row["timestamp"].isoformat(),
@@ -76,7 +78,11 @@ def sync_recent_bars_and_load_warmup(conn, live_spot):
                         f"""
                         INSERT INTO {RAW_BARS_TABLE} (timestamp, open, high, low, close, volume)
                         VALUES (%s, %s, %s, %s, %s, %s)
-                        ON CONFLICT DO NOTHING;
+                        ON CONFLICT (timestamp) DO UPDATE SET
+                            high = GREATEST({RAW_BARS_TABLE}.high, EXCLUDED.high),
+                            low = LEAST({RAW_BARS_TABLE}.low, EXCLUDED.low),
+                            close = EXCLUDED.close,
+                            volume = EXCLUDED.volume;
                         """,
                         insert_data
                     )
@@ -106,7 +112,6 @@ def sync_recent_bars_and_load_warmup(conn, live_spot):
     except Exception as e:
         print(f"Note on DB warmup fetch: {e}")
 
-    # Place local_df second so fresh cTrader bars always take priority with keep="last"
     combined = pd.concat([db_df, local_df], ignore_index=True)
     combined = (
         combined.dropna(subset=["timestamp", "open", "high", "low", "close"])
@@ -115,15 +120,6 @@ def sync_recent_bars_and_load_warmup(conn, live_spot):
         .tail(1500)
         .reset_index(drop=True)
     )
-
-    if live_spot is not None and not combined.empty:
-        idx = combined.index[-1]
-        combined.loc[idx, "close"] = live_spot
-        if live_spot > float(combined.loc[idx, "high"]):
-            combined.loc[idx, "high"] = live_spot
-        if live_spot < float(combined.loc[idx, "low"]):
-            combined.loc[idx, "low"] = live_spot
-
     return combined
 
 def init_db_table(conn, table_name):
@@ -132,36 +128,65 @@ def init_db_table(conn, table_name):
             CREATE TABLE IF NOT EXISTS {table_name} (
                 id SERIAL PRIMARY KEY,
                 timestamp TIMESTAMPTZ NOT NULL,
-                price NUMERIC(10, 2) NOT NULL,
+                price NUMERIC(12, 2) NOT NULL,
                 signal VARCHAR(16) NOT NULL,
                 reason TEXT,
                 entry_zone VARCHAR(128),
-                entry NUMERIC(10, 2),
-                take_profit NUMERIC(10, 2),
+                entry NUMERIC(12, 2),
+                take_profit NUMERIC(12, 2),
                 status VARCHAR(32) DEFAULT 'ACTIVE',
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
             ALTER TABLE {table_name} ALTER COLUMN entry_zone TYPE VARCHAR(128);
+            ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS {table_name}_timestamp_key;
             GRANT SELECT ON {table_name} TO anon, authenticated;
         """)
     conn.commit()
+
+def send_telegram_alert(tf, signal, price_0d, entry_zone, eq_0d, rsi, stretch_pct):
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not (bot_token and chat_id and signal in ["BUY", "SELL"]):
+        return
+
+    icon = "🟢" if signal == "BUY" else "🔴"
+    msg = (
+        f"🦅 *US30 QUANTUM ({tf.upper()})*\n"
+        f"========================\n"
+        f"{icon} *SIGNAL: {signal}*\n"
+        f"💰 *Live Price:* {price_0d:.0f}\n"
+        f"🏁 *Equilibrium TP:* {eq_0d:.0f}\n"
+        f"📍 *Limit Tiers:* {entry_zone}\n"
+        f"📊 *Stretch:* {stretch_pct:.1f}% | *RSI:* {rsi:.1f}"
+    )
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        data = urllib.parse.urlencode({"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}).encode("utf-8")
+        req = urllib.request.Request(url, data=data)
+        urllib.request.urlopen(req, timeout=10)
+        print(f"[{tf.upper()}] Telegram alert sent!")
+    except Exception as e:
+        print(f"[{tf.upper()}] Telegram alert note: {e}")
 
 def predict_for_timeframe(conn, raw_df, tf, live_spot):
     model_path = f"model_{tf}.pkl"
     table_name = TABLES[tf]
 
     if not os.path.exists(model_path):
-        print(f"[{tf.upper()}] Model file {model_path} missing. Training now...")
-        train_horizon(raw_df, tf, HORIZONS[tf])
+        print(f"[{tf.upper()}] Model file {model_path} missing. Loading full dataset to train...")
+        full_df = sync_and_load_all_m5_bars()
+        train_horizon(full_df, tf, HORIZONS[tf])
 
     models = joblib.load(model_path)
     expected_features = len(FEATURES)
     actual_features = getattr(models["up"], "n_features_in_", expected_features)
     if actual_features != expected_features:
-        print(f"[{tf.upper()}] Cached model has {actual_features} features (expected {expected_features}). Retraining...")
-        train_horizon(raw_df, tf, HORIZONS[tf])
+        print(f"[{tf.upper()}] Cached model has {actual_features} features (expected {expected_features}). Retraining on full dataset...")
+        full_df = sync_and_load_all_m5_bars()
+        train_horizon(full_df, tf, HORIZONS[tf])
         models = joblib.load(model_path)
 
+    # Compute indicators on pure closed M5 bars (matching train.py 100%)
     df_feat = build_features(raw_df, tf).dropna(subset=FEATURES).reset_index(drop=True)
     if df_feat.empty:
         print(f"[{tf.upper()}] Not enough warmup bars to compute features (rows={len(raw_df)}).")
@@ -170,18 +195,24 @@ def predict_for_timeframe(conn, raw_df, tf, live_spot):
     latest_row = df_feat.iloc[[-1]]
     X_latest = latest_row[FEATURES]
 
-    # Use live cTrader spot price if available, otherwise latest M5 bar close
     price = float(live_spot) if live_spot is not None else float(latest_row["close"].iloc[0])
     rsi = float(latest_row["rsi"].iloc[0])
     anchor_ema = float(latest_row["ema_fast"].iloc[0])
+    atr_val = max(float(latest_row["atr"].iloc[0]), 5.0)
 
     pred_up = float(models["up"].predict(X_latest)[0])
     pred_down = float(models["down"].predict(X_latest)[0])
 
     proj_high = anchor_ema + pred_up
     proj_low = anchor_ema - pred_down
-    total_range = max(proj_high - proj_low, 10.0)
 
+    # Ensure structural projected range is valid even if signed excursion is tight
+    if proj_high - proj_low < atr_val:
+        mid_temp = (proj_high + proj_low) / 2.0
+        proj_high = mid_temp + (atr_val / 2.0)
+        proj_low = mid_temp - (atr_val / 2.0)
+
+    total_range = max(proj_high - proj_low, 10.0)
     midline_eq = (proj_high + proj_low) / 2.0
     half_range = total_range / 2.0
 
@@ -213,11 +244,10 @@ def predict_for_timeframe(conn, raw_df, tf, live_spot):
         f"S0.55:{s_055:.0f},S0.80:{s_080:.0f},S1.00:{s_100:.0f}"
     )
 
-    up_ratio = (pred_up / total_range) * 100.0
-    down_ratio = (pred_down / total_range) * 100.0
-    bias_pct = up_ratio if price < midline_eq else down_ratio
+    # True Stretch % from Equilibrium toward outer limit (55.0%+ triggers BUY/SELL)
+    stretch_pct = min((abs(price - midline_eq) / max(half_range, 1.0)) * 100.0, 100.0)
 
-    reason = f"Bias:{bias_pct:.1f}% | RSI:{rsi:.1f} | EQ:{eq_0d:.0f}"
+    reason = f"Bias:{stretch_pct:.1f}% | RSI:{rsi:.1f} | EQ:{eq_0d:.0f}"
     run_ts = datetime.datetime.now(datetime.timezone.utc)
 
     init_db_table(conn, table_name)
@@ -231,12 +261,14 @@ def predict_for_timeframe(conn, raw_df, tf, live_spot):
     print(
         f"[{tf.upper()}] {signal} @ {price_0d:.0f} (Spot: {price:.2f}) | AnchorEMA:{anchor_ema:.0f} | "
         f"Buy(0.55/0.8/1.0): {b_055:.0f}/{b_080:.0f}/{b_100:.0f} | "
-        f"Sell(0.55/0.8/1.0): {s_055:.0f}/{s_080:.0f}/{s_100:.0f} | EQ/TP: {eq_0d:.0f}"
+        f"Sell(0.55/0.8/1.0): {s_055:.0f}/{s_080:.0f}/{s_100:.0f} | EQ/TP: {eq_0d:.0f} | Stretch: {stretch_pct:.1f}%"
     )
+
+    send_telegram_alert(tf, signal, price_0d, entry_zone, eq_0d, rsi, stretch_pct)
 
 if __name__ == "__main__":
     live_spot = get_live_spot_quote()
     with psycopg.connect(DB_URL) as conn:
-        raw_df = sync_recent_bars_and_load_warmup(conn, live_spot)
+        raw_df = sync_recent_bars_and_load_warmup(conn)
         for tf in ["30m", "4h"]:
             predict_for_timeframe(conn, raw_df, tf, live_spot)
