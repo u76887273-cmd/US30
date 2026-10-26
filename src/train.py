@@ -31,31 +31,29 @@ def parse_mixed_timestamps(series):
     except Exception:
         return pd.to_datetime(series, format="mixed", utc=True, errors="coerce")
 
-def format_db_timestamp(ts):
-    """Formats UTC timestamps to 'YYYY-MM-DD HH:MM:SS' to match m5_bars text column in Supabase."""
-    return ts.strftime("%Y-%m-%d %H:%M:%S")
-
 def ensure_unique_timestamp_constraint(conn):
-    """Normalizes timestamp strings in m5_bars, removes duplicates, and creates a UNIQUE index."""
+    """Safely deduplicates m5_bars in Supabase and ensures a UNIQUE index on timestamp exists."""
     try:
         with conn.cursor() as cur:
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-                    timestamp TEXT NOT NULL,
+                    timestamp TIMESTAMPTZ NOT NULL,
                     open DOUBLE PRECISION,
                     high DOUBLE PRECISION,
                     low DOUBLE PRECISION,
                     close DOUBLE PRECISION,
                     volume DOUBLE PRECISION
                 );
-                UPDATE {TABLE_NAME}
-                SET timestamp = to_char(timestamp::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
-                WHERE timestamp LIKE '%T%' OR timestamp LIKE '%+%' OR timestamp LIKE '%Z%';
-
-                DELETE FROM {TABLE_NAME} a USING {TABLE_NAME} b
-                WHERE a.ctid < b.ctid AND a.timestamp = b.timestamp;
-
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_{TABLE_NAME}_timestamp ON {TABLE_NAME} (timestamp);
+                DROP INDEX IF EXISTS idx_{TABLE_NAME}_timestamp;
+                DELETE FROM {TABLE_NAME} a
+                USING (
+                    SELECT MIN(ctid) AS keep_ctid, timestamp
+                    FROM {TABLE_NAME}
+                    GROUP BY timestamp
+                    HAVING COUNT(*) > 1
+                ) b
+                WHERE a.timestamp = b.timestamp AND a.ctid <> b.keep_ctid;
+                CREATE UNIQUE INDEX idx_{TABLE_NAME}_timestamp ON {TABLE_NAME} (timestamp);
             """)
         conn.commit()
     except Exception as e:
@@ -99,7 +97,7 @@ def sync_and_load_all_m5_bars():
                         with conn.cursor() as cur:
                             insert_data = [
                                 (
-                                    format_db_timestamp(row["timestamp"]),
+                                    row["timestamp"].isoformat(),
                                     float(row["open"]),
                                     float(row["high"]),
                                     float(row["low"]),
@@ -151,6 +149,7 @@ def sync_and_load_all_m5_bars():
 
 def build_features(df, tf_name="30m"):
     df = df.copy()
+    # Synchronized with 6-bar (30m -> scale=1) and 48-bar (4h -> scale=8) horizons
     scale = 1 if tf_name == "30m" else 8
 
     df["ema_fast"] = df["close"].ewm(span=20 * scale, adjust=False).mean()
