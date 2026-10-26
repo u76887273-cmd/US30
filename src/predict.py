@@ -19,7 +19,7 @@ from train import (
 )
 
 DB_URL = os.environ.get("DATABASE_URL")
-RAW_BARS_TABLE = "features_m5"  # Matches your existing US30 Supabase table
+RAW_BARS_TABLE = "m5_bars"  # Matches your existing US30 Supabase table
 
 TABLES = {
     "30m": "supreme_grid_log",
@@ -128,12 +128,12 @@ def init_db_table(conn, table_name):
             CREATE TABLE IF NOT EXISTS {table_name} (
                 id SERIAL PRIMARY KEY,
                 timestamp TIMESTAMPTZ NOT NULL,
-                price NUMERIC(12, 2) NOT NULL,
+                price NUMERIC(10, 2) NOT NULL,
                 signal VARCHAR(16) NOT NULL,
                 reason TEXT,
                 entry_zone VARCHAR(128),
-                entry NUMERIC(12, 2),
-                take_profit NUMERIC(12, 2),
+                entry NUMERIC(10, 2),
+                take_profit NUMERIC(10, 2),
                 status VARCHAR(32) DEFAULT 'ACTIVE',
                 created_at TIMESTAMPTZ DEFAULT NOW()
             );
