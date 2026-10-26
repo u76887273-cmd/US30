@@ -33,8 +33,8 @@ jobs:
       CTRADER_CLIENT_ID: ${{ secrets.CTRADER_CLIENT_ID || secrets.CLIENT_ID || vars.CTRADER_CLIENT_ID }}
       CTRADER_CLIENT_SECRET: ${{ secrets.CTRADER_CLIENT_SECRET || secrets.CLIENT_SECRET || vars.CTRADER_CLIENT_SECRET }}
       CTRADER_ACCESS_TOKEN: ${{ secrets.CTRADER_ACCESS_TOKEN || secrets.ACCESS_TOKEN || vars.CTRADER_ACCESS_TOKEN }}
-      ACCOUNT_ID: ${{ secrets.ACCOUNT_ID || secrets.CTRADER_ACCOUNT_ID || vars.ACCOUNT_ID }}
-      CTRADER_ACCOUNT_ID: ${{ secrets.CTRADER_ACCOUNT_ID || secrets.ACCOUNT_ID || vars.CTRADER_ACCOUNT_ID }}
+      ACCOUNT_ID: ${{ secrets.ACCOUNT_ID || secrets.CTRADER_ACCOUNT_ID || secrets.CTID_TRADER_ACCOUNT_ID || vars.ACCOUNT_ID }}
+      CTRADER_ACCOUNT_ID: ${{ secrets.CTRADER_ACCOUNT_ID || secrets.ACCOUNT_ID || secrets.CTID_TRADER_ACCOUNT_ID || vars.CTRADER_ACCOUNT_ID }}
       SYMBOL_ID: ${{ secrets.SYMBOL_ID || secrets.CTRADER_SYMBOL_ID || vars.SYMBOL_ID || '1287' }}
 
     steps:
