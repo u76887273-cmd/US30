@@ -1,4 +1,4 @@
-"""Fetch cTrader US30 M5 bars and live spot quote with zero truncation."""
+"""Fetch cTrader US30 M5 bars and live spot quote with hardcoded credentials."""
 
 import datetime as dt
 import json
@@ -13,45 +13,28 @@ from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import *
 from ctrader_open_api.messages.OpenApiMessages_pb2 import *
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import *
 
+# ==========================================
+# HARDCODED CTRADER CREDENTIALS & CONFIG
+# ==========================================
+CLIENT_ID = "40052_sFwZLFliw9QV9nZ5jODc1hClaf2IfOn6f3vXYRzgY4webzpn1k"
+CLIENT_SECRET = "658cBabOPEpzrjV5zknPetyoEJcizdvg3hQcA8nlZDI29WT2nu"
+ACCESS_TOKEN = "k-KgV20T1eC0taKCQFH6wlJPU2jCyv-vl4QryAQXNz4"
+ACCOUNT_ID = 40052
+ENV_SYMBOL_ID = 1287  # US30 Symbol ID
+CTRADER_ENV = "live"
+# ==========================================
 
-def get_env_str(*keys, default=""):
-    for key in keys:
-        value = os.environ.get(key)
-        if value and str(value).strip():
-            return str(value).strip()
-    return default
-
-
-def get_env_int(*keys, default=0):
-    for key in keys:
-        value = os.environ.get(key)
-        if value and str(value).strip():
-            try:
-                return int(str(value).strip())
-            except ValueError:
-                pass
-    return default
-
-
-CLIENT_ID = get_env_str("CTRADER_CLIENT_ID", "CLIENT_ID", "CTRADER_ID", "APP_CLIENT_ID")
-CLIENT_SECRET = get_env_str("CTRADER_CLIENT_SECRET", "CLIENT_SECRET", "CTRADER_SECRET", "APP_CLIENT_SECRET")
-ACCESS_TOKEN = get_env_str("CTRADER_ACCESS_TOKEN", "ACCESS_TOKEN", "CTRADER_TOKEN", "TOKEN")
-
-# Hardcoded account ID fallback (40052)
-ACCOUNT_ID = get_env_int("ACCOUNT_ID", "CTRADER_ACCOUNT_ID", "CTID_TRADER_ACCOUNT_ID", default=40052)
-
-SYMBOL_ID = get_env_int("SYMBOL_ID", "CTRADER_SYMBOL_ID", default=1287)  # US30 Symbol ID = 1287
-CTRADER_ENV = get_env_str("CTRADER_ENV", "CTRADER_ACCOUNT_ENV", default="live").lower()
-DATA_DIR = Path(get_env_str("DATA_DIR", default="."))
+DATA_DIR = Path(".")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-PRICE_DIGITS = get_env_int("CTRADER_PRICE_DIGITS", default=2)
-CTRADER_HOST = EndPoints.PROTOBUF_DEMO_HOST if CTRADER_ENV == "demo" else EndPoints.PROTOBUF_LIVE_HOST
+PRICE_DIGITS = 2
+CTRADER_HOST = EndPoints.PROTOBUF_LIVE_HOST
 
 client = Client(CTRADER_HOST, EndPoints.PROTOBUF_PORT, TcpProtocol)
 timeout_call = None
 spot_wait_call = None
 symbol_name = "#US30"
+resolved_symbol_id = ENV_SYMBOL_ID
 m5_done = False
 quote_done = False
 shutting_down = False
@@ -101,7 +84,7 @@ def on_spot_wait_timeout():
             payload = {
                 "status": "QUOTE_RECEIVED",
                 "symbol": symbol_name,
-                "symbol_id": SYMBOL_ID,
+                "symbol_id": resolved_symbol_id,
                 "current_price": latest_m5_close,
                 "price_basis": "m5_close_fallback",
                 "bid": latest_m5_close,
@@ -146,8 +129,42 @@ def on_app_auth(_result):
 
 
 def on_account_auth(_result):
-    print(f"cTrader account authenticated. Requesting latest M5 bars & live spot for Symbol ID {SYMBOL_ID}...")
+    print("cTrader account authenticated successfully. Requesting symbol list...")
+    req = ProtoOASymbolsListReq()
+    req.ctidTraderAccountId = ACCOUNT_ID
+    deferred = client.send(req, responseTimeoutInSeconds=15)
+    deferred.addCallback(on_symbols_list)
+    deferred.addErrback(on_symbols_list_error)
+
+
+def on_symbols_list_error(failure):
+    print(f"⚠️ Could not fetch symbol list ({failure}). Falling back to configured Symbol ID: {ENV_SYMBOL_ID}")
     start_market_data_requests()
+    return None
+
+
+def on_symbols_list(result):
+    global resolved_symbol_id
+    response = Protobuf.extract(result)
+    if isinstance(response, ProtoOAErrorRes):
+        print(f"⚠️ Symbol list error response. Falling back to ID {ENV_SYMBOL_ID}")
+        start_market_data_requests()
+        return result
+
+    found = False
+    for sym in getattr(response, "symbol", []):
+        name = getattr(sym, "symbolName", "").upper()
+        if "US30" in name or "DOW" in name:
+            resolved_symbol_id = int(sym.symbolId)
+            print(f"🎯 Discovered US30 Symbol Name: '{sym.symbolName}' -> Resolved Symbol ID: {resolved_symbol_id}")
+            found = True
+            break
+
+    if not found:
+        print(f"ℹ️ US30 not found in symbol list by name. Using configured ID: {ENV_SYMBOL_ID}")
+
+    start_market_data_requests()
+    return result
 
 
 def trendbar_to_row(bar):
@@ -172,8 +189,23 @@ def trendbar_to_row(bar):
 
 def on_trendbars(result):
     global m5_done, spot_wait_call, latest_m5_close
-    response = Protobuf.extract(result)
-    rows = [trendbar_to_row(bar) for bar in response.trendbar]
+    try:
+        response = Protobuf.extract(result)
+    except Exception as e:
+        print(f"❌ Failed to extract protobuf message: {e}")
+        m5_done = True
+        maybe_finish()
+        return result
+
+    if isinstance(response, ProtoOAErrorRes):
+        err_code = getattr(response, "errorCode", "UNKNOWN")
+        err_desc = getattr(response, "description", "No description provided")
+        print(f"❌ cTrader Error Response from Server: Code=[{err_code}] Description=[{err_desc}]")
+        m5_done = True
+        maybe_finish()
+        return result
+
+    rows = [trendbar_to_row(bar) for bar in getattr(response, "trendbar", [])]
     path = DATA_DIR / "data_m5.csv"
 
     if rows:
@@ -191,14 +223,14 @@ def on_trendbars(result):
             f"Close: {latest_m5_close:.{PRICE_DIGITS}f}"
         )
     else:
-        print("⚠️ WARNING: No M5 bars returned by cTrader.")
+        print("⚠️ WARNING: No M5 bars returned by cTrader for Symbol ID:", resolved_symbol_id)
 
     m5_done = True
 
     if not quote_done and not shutting_down:
         spot_req = ProtoOASubscribeSpotsReq()
         spot_req.ctidTraderAccountId = ACCOUNT_ID
-        spot_req.symbolId.append(SYMBOL_ID)
+        spot_req.symbolId.append(resolved_symbol_id)
         spot_req.subscribeToSpotTimestamp = True
         d_spot = client.send(spot_req, responseTimeoutInSeconds=15)
         d_spot.addErrback(on_fatal_error)
@@ -216,11 +248,12 @@ def start_market_data_requests():
 
     bar_req = ProtoOAGetTrendbarsReq()
     bar_req.ctidTraderAccountId = ACCOUNT_ID
-    bar_req.symbolId = SYMBOL_ID
+    bar_req.symbolId = resolved_symbol_id
     bar_req.period = ProtoOATrendbarPeriod.M5
     bar_req.fromTimestamp = int((now - dt.timedelta(hours=lookback_hours)).timestamp() * 1000)
     bar_req.toTimestamp = now_ms
 
+    print(f"Requesting M5 bars for Symbol ID {resolved_symbol_id}...")
     d_bars = client.send(bar_req, responseTimeoutInSeconds=20)
     d_bars.addCallback(on_trendbars)
     d_bars.addErrback(on_fatal_error)
@@ -235,9 +268,13 @@ def on_message_received(_client, message):
     except Exception:
         return
 
+    if isinstance(event, ProtoOAErrorRes):
+        print(f"❌ cTrader Spot Error: {getattr(event, 'description', 'Unknown error')} (Code: {getattr(event, 'errorCode', 'N/A')})")
+        return
+
     if not isinstance(event, ProtoOASpotEvent):
         return
-    if int(getattr(event, "symbolId", -1)) != SYMBOL_ID:
+    if int(getattr(event, "symbolId", -1)) != resolved_symbol_id:
         return
 
     bid_raw = int(getattr(event, "bid", 0) or 0)
@@ -264,7 +301,7 @@ def on_message_received(_client, message):
     payload = {
         "status": "QUOTE_RECEIVED",
         "symbol": symbol_name,
-        "symbol_id": SYMBOL_ID,
+        "symbol_id": resolved_symbol_id,
         "current_price": current_price,
         "price_basis": price_basis,
         "bid": bid,
@@ -286,27 +323,14 @@ def disconnected(_client, _reason):
 
 
 if __name__ == "__main__":
-    print(f"DEBUG -> CLIENT_ID loaded: {bool(CLIENT_ID)}, ACCOUNT_ID: {ACCOUNT_ID}, SYMBOL_ID: {SYMBOL_ID}")
-
-    missing = [
-        name for name, val in [
-            ("CLIENT_ID", CLIENT_ID),
-            ("CLIENT_SECRET", CLIENT_SECRET),
-            ("ACCESS_TOKEN", ACCESS_TOKEN),
-            ("ACCOUNT_ID", ACCOUNT_ID),
-            ("SYMBOL_ID", SYMBOL_ID),
-        ] if not val or val == 0 or str(val).strip() == ""
-    ]
-    if missing:
-        print(f"⚠️ Notice: Missing or empty environment variable(s): {', '.join(missing)}")
-        sys.exit(0)
+    print("DEBUG -> Hardcoded cTrader credentials loaded for Account ID:", ACCOUNT_ID)
 
     write_json_atomic(
         DATA_DIR / "latest_quote.json",
         {
             "status": "PENDING",
             "symbol": symbol_name,
-            "symbol_id": SYMBOL_ID,
+            "symbol_id": ENV_SYMBOL_ID,
             "current_price": None,
             "received_at_utc": iso_utc(utc_now()),
         },
