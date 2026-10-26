@@ -46,7 +46,6 @@
                     </span>
                     <div class="flex items-center gap-2">
                         <span id="meta-val-30m" class="text-xs font-mono text-slate-400">RSI: -- | Stretch: --</span>
-                        <span id="status-val-30m" class="hidden px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider"></span>
                     </div>
                 </div>
 
@@ -108,7 +107,6 @@
                     </span>
                     <div class="flex items-center gap-2">
                         <span id="meta-val-4h" class="text-xs font-mono text-slate-400">RSI: -- | Stretch: --</span>
-                        <span id="status-val-4h" class="hidden px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider"></span>
                     </div>
                 </div>
 
@@ -188,7 +186,7 @@
         const pathSegment = window.location.pathname.split("/")[1] || "";
         const GITHUB_REPO = (pathSegment && !pathSegment.endsWith(".html"))
             ? pathSegment
-            : "US30";
+            : "US30-Quantum-";
 
         let latestKnownRunIso = null;
 
@@ -213,17 +211,6 @@
             const rsiText = rsiMatch ? Number(rsiMatch[1]).toFixed(1) : "--";
             const biasText = biasMatch ? (biasMatch[1].endsWith("%") ? biasMatch[1] : `${biasMatch[1]}%`) : "--";
             document.getElementById(`meta-val-${tf}`).innerText = `RSI: ${rsiText} | Stretch: ${biasText}`;
-
-            const statusEl = document.getElementById(`status-val-${tf}`);
-            if (row.status === "HIT_TP" || row.status === "TP_HIT") {
-                statusEl.innerText = "HIT TP ✓";
-                statusEl.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-emerald-500/20 border border-emerald-500/40 text-emerald-300";
-            } else if (signal === "BUY" || signal === "SELL") {
-                statusEl.innerText = "ACTIVE";
-                statusEl.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-amber-500/20 border border-amber-500/40 text-amber-300";
-            } else {
-                statusEl.className = "hidden";
-            }
 
             const eqValue = (row.take_profit !== null && row.take_profit !== undefined)
                 ? Number(row.take_profit)
