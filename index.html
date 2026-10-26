@@ -45,7 +45,7 @@
                         30-Minute (30M)
                     </span>
                     <div class="flex items-center gap-2">
-                        <span id="meta-val-30m" class="text-xs font-mono text-slate-400">RSI: -- | Bias: --</span>
+                        <span id="meta-val-30m" class="text-xs font-mono text-slate-400">RSI: -- | Stretch: --</span>
                         <span id="status-val-30m" class="hidden px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider"></span>
                     </div>
                 </div>
@@ -107,7 +107,7 @@
                         4-Hour (4H)
                     </span>
                     <div class="flex items-center gap-2">
-                        <span id="meta-val-4h" class="text-xs font-mono text-slate-400">RSI: -- | Bias: --</span>
+                        <span id="meta-val-4h" class="text-xs font-mono text-slate-400">RSI: -- | Stretch: --</span>
                         <span id="status-val-4h" class="hidden px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider"></span>
                     </div>
                 </div>
@@ -192,11 +192,6 @@
 
         let latestKnownRunIso = null;
 
-        function formatPricesToInteger(str) {
-            if (!str) return "--";
-            return str.replace(/\b(\d+\.\d+)\b/g, (match) => Math.round(Number(match)).toString());
-        }
-
         function renderTimeframeCard(tf, row) {
             const sigEl = document.getElementById(`signal-val-${tf}`);
             const signal = (row.signal || "WAIT").toUpperCase();
@@ -217,10 +212,10 @@
 
             const rsiText = rsiMatch ? Number(rsiMatch[1]).toFixed(1) : "--";
             const biasText = biasMatch ? (biasMatch[1].endsWith("%") ? biasMatch[1] : `${biasMatch[1]}%`) : "--";
-            document.getElementById(`meta-val-${tf}`).innerText = `RSI: ${rsiText} | Bias: ${biasText}`;
+            document.getElementById(`meta-val-${tf}`).innerText = `RSI: ${rsiText} | Stretch: ${biasText}`;
 
             const statusEl = document.getElementById(`status-val-${tf}`);
-            if (row.status === "HIT_TP") {
+            if (row.status === "HIT_TP" || row.status === "TP_HIT") {
                 statusEl.innerText = "HIT TP ✓";
                 statusEl.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-emerald-500/20 border border-emerald-500/40 text-emerald-300";
             } else if (signal === "BUY" || signal === "SELL") {
@@ -235,7 +230,6 @@
                 : (eqMatch ? Number(eqMatch[1]) : null);
             const eqFormatted = (eqValue !== null && !Number.isNaN(eqValue)) ? Math.round(eqValue).toString() : "--";
 
-            // Extract 3 Buy levels (0.55, 0.80, 1.00) and 3 Sell levels (0.55, 0.80, 1.00)
             const zoneText = row.entry_zone || "";
             const extractTier = (prefix) => {
                 const regex = new RegExp(prefix + "\\s*:\\s*([0-9.]+)", "i");
@@ -251,7 +245,6 @@
             let s080 = extractTier("S0\\.80");
             let s100 = extractTier("S1\\.00");
 
-            // Fallback in case a row in DB still has the older 2-number format ("B: 52704 - 52711 | S: 52765 - 52772")
             if (!b055 && !s055 && zoneText.includes("|")) {
                 const parts = zoneText.split("|");
                 const bNums = (parts[0] || "").match(/\d+(\.\d+)?/g) || [];
@@ -342,7 +335,7 @@
         }
 
         async function forceRun() {
-            let token = localStorage.getItem("github_pat_us30") || localStorage.getItem("github_pat");
+            let token = localStorage.getItem("github_pat_us30") || localStorage.getItem("github_pat_jp225") || localStorage.getItem("github_pat");
             
             if (!token) {
                 token = prompt("🔒 FIRST TIME SETUP:\n\nPlease paste your GitHub Token (ghp_... or github_pat_...) here:");
@@ -394,6 +387,7 @@
                     if (response && (response.status === 401 || response.status === 403)) {
                         localStorage.removeItem("github_pat");
                         localStorage.removeItem("github_pat_us30");
+                        localStorage.removeItem("github_pat_jp225");
                         alert(`❌ Token unauthorized or expired for ${GITHUB_USERNAME}/${GITHUB_REPO}. Cleared from memory—click again to enter a new token.`);
                     } else if (response && response.status === 404) {
                         alert(`❌ Workflow file or repository (${GITHUB_USERNAME}/${GITHUB_REPO}) not found (HTTP 404). Make sure your token has 'repo' and 'workflow' permissions.`);
