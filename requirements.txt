@@ -1,4 +1,4 @@
-ctrader-open-api
+ctrader-open-api==0.9.2
 twisted
 service_identity
 pyOpenSSL
@@ -6,4 +6,4 @@ pandas
 numpy
 scikit-learn
 joblib
-psycopg[binary]
+psycopg[binary]==3.1.18
