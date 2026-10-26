@@ -1,4 +1,4 @@
-"""Fetch cTrader #US30 M5 bars and live spot quote with auto Symbol ID lookup."""
+"""Fetch cTrader US30 M5 bars and live spot quote with zero truncation."""
 
 import datetime as dt
 import json
@@ -37,7 +37,7 @@ CLIENT_ID = get_env_str("CTRADER_CLIENT_ID", "CLIENT_ID", "CTRADER_ID", "APP_CLI
 CLIENT_SECRET = get_env_str("CTRADER_CLIENT_SECRET", "CLIENT_SECRET", "CTRADER_SECRET", "APP_CLIENT_SECRET")
 ACCESS_TOKEN = get_env_str("CTRADER_ACCESS_TOKEN", "ACCESS_TOKEN", "CTRADER_TOKEN", "TOKEN")
 ACCOUNT_ID = get_env_int("ACCOUNT_ID", "CTRADER_ACCOUNT_ID", "CTID_TRADER_ACCOUNT_ID", default=0)
-SYMBOL_ID = get_env_int("SYMBOL_ID", "CTRADER_SYMBOL_ID", default=0)
+SYMBOL_ID = get_env_int("SYMBOL_ID", "CTRADER_SYMBOL_ID", default=1287)  # US30 Symbol ID = 1287
 CTRADER_ENV = get_env_str("CTRADER_ENV", "CTRADER_ACCOUNT_ENV", default="live").lower()
 DATA_DIR = Path(get_env_str("DATA_DIR", default="."))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -52,7 +52,6 @@ symbol_name = "#US30"
 m5_done = False
 quote_done = False
 shutting_down = False
-retried_lookup = False
 latest_m5_close = None
 
 
@@ -88,7 +87,7 @@ def stop_reactor_safely():
 
 def maybe_finish():
     if m5_done and quote_done and not shutting_down:
-        print("✅ #US30 closed M5 bars and live cTrader spot quote synced cleanly.")
+        print("✅ US30 closed M5 bars and live cTrader spot quote synced cleanly.")
         stop_reactor_safely()
 
 
@@ -114,7 +113,7 @@ def on_spot_wait_timeout():
 
 def on_timeout():
     if not shutting_down:
-        print("⚠️ WARNING: cTrader fetch timed out after 35 seconds.")
+        print("⚠️ WARNING: cTrader fetch timed out after 35 seconds. Proceeding with available data.")
         stop_reactor_safely()
 
 
@@ -144,52 +143,7 @@ def on_app_auth(_result):
 
 
 def on_account_auth(_result):
-    if SYMBOL_ID > 0:
-        print(f"cTrader authenticated. Requesting #US30 data for SYMBOL_ID={SYMBOL_ID}...")
-        start_market_data_requests()
-    else:
-        print("cTrader authenticated. Auto-detecting #US30 Symbol ID from broker...")
-        lookup_us30_symbol()
-
-
-def lookup_us30_symbol():
-    req = ProtoOASymbolsListReq()
-    req.ctidTraderAccountId = ACCOUNT_ID
-    d = client.send(req, responseTimeoutInSeconds=20)
-    d.addCallback(on_symbols_list)
-    d.addErrback(on_fatal_error)
-
-
-def on_symbols_list(result):
-    global SYMBOL_ID, symbol_name
-    response = Protobuf.extract(result)
-    symbols = list(getattr(response, "symbol", []))
-
-    preferred = ["#US30", "US30", "US30.CASH", "WS30", "DJ30", "USA30"]
-    chosen = None
-    for target in preferred:
-        for s in symbols:
-            if str(getattr(s, "symbolName", "")).upper().strip() == target:
-                chosen = s
-                break
-        if chosen:
-            break
-
-    if not chosen:
-        for s in symbols:
-            sname = str(getattr(s, "symbolName", "")).upper()
-            if "US30" in sname or "WS30" in sname or "DJ30" in sname:
-                chosen = s
-                break
-
-    if not chosen:
-        print("❌ Could not find #US30 symbol in cTrader account!")
-        stop_reactor_safely()
-        return
-
-    SYMBOL_ID = int(chosen.symbolId)
-    symbol_name = str(chosen.symbolName)
-    print(f"✅ Found broker symbol '{symbol_name}' with SYMBOL_ID={SYMBOL_ID}")
+    print(f"cTrader account authenticated. Requesting latest M5 bars & live spot for Symbol ID {SYMBOL_ID}...")
     start_market_data_requests()
 
 
@@ -214,16 +168,10 @@ def trendbar_to_row(bar):
 
 
 def on_trendbars(result):
-    global m5_done, spot_wait_call, retried_lookup, latest_m5_close
+    global m5_done, spot_wait_call, latest_m5_close
     response = Protobuf.extract(result)
     rows = [trendbar_to_row(bar) for bar in response.trendbar]
     path = DATA_DIR / "data_m5.csv"
-
-    if not rows and not retried_lookup:
-        retried_lookup = True
-        print(f"⚠️ 0 bars returned for SYMBOL_ID={SYMBOL_ID}. Auto-looking up #US30 Symbol ID...")
-        lookup_us30_symbol()
-        return result
 
     if rows:
         df = (
@@ -240,11 +188,19 @@ def on_trendbars(result):
             f"Close: {latest_m5_close:.{PRICE_DIGITS}f}"
         )
     else:
-        print("❌ ERROR: No M5 bars returned by cTrader.")
+        print("⚠️ WARNING: No M5 bars returned by cTrader.")
 
     m5_done = True
+
     if not quote_done and not shutting_down:
-        spot_wait_call = reactor.callLater(6.0, on_spot_wait_timeout)
+        spot_req = ProtoOASubscribeSpotsReq()
+        spot_req.ctidTraderAccountId = ACCOUNT_ID
+        spot_req.symbolId.append(SYMBOL_ID)
+        spot_req.subscribeToSpotTimestamp = True
+        d_spot = client.send(spot_req, responseTimeoutInSeconds=15)
+        d_spot.addErrback(on_fatal_error)
+        spot_wait_call = reactor.callLater(5.0, on_spot_wait_timeout)
+
     maybe_finish()
     return result
 
@@ -253,20 +209,15 @@ def start_market_data_requests():
     now = utc_now()
     now_ms = int(now.timestamp() * 1000)
 
-    spot_req = ProtoOASubscribeSpotsReq()
-    spot_req.ctidTraderAccountId = ACCOUNT_ID
-    spot_req.symbolId.append(SYMBOL_ID)
-    spot_req.subscribeToSpotTimestamp = True
-    d_spot = client.send(spot_req, responseTimeoutInSeconds=20)
-    d_spot.addErrback(on_fatal_error)
+    # 36 hours on Tue-Fri (~432 bars), or 84 hours on Sun/Mon to bridge the 49-hour weekend gap without exceeding 1,000 bars
+    lookback_hours = 84 if now.weekday() in (6, 0) else 36
 
     bar_req = ProtoOAGetTrendbarsReq()
     bar_req.ctidTraderAccountId = ACCOUNT_ID
     bar_req.symbolId = SYMBOL_ID
     bar_req.period = ProtoOATrendbarPeriod.M5
-    bar_req.fromTimestamp = int((now - dt.timedelta(days=5)).timestamp() * 1000)
+    bar_req.fromTimestamp = int((now - dt.timedelta(hours=lookback_hours)).timestamp() * 1000)
     bar_req.toTimestamp = now_ms
-    bar_req.count = 1800
 
     d_bars = client.send(bar_req, responseTimeoutInSeconds=20)
     d_bars.addCallback(on_trendbars)
@@ -299,10 +250,12 @@ def on_message_received(_client, message):
     bid = scale_val(bid_raw)
     ask = scale_val(ask_raw)
 
-    if bid is not None:
+    if bid is not None and ask is not None:
+        current_price, price_basis = round((bid + ask) / 2.0, PRICE_DIGITS), "mid_bid_ask"
+    elif bid is not None:
         current_price, price_basis = bid, "bid"
     elif ask is not None:
-        current_price, price_basis = ask, "ask_fallback"
+        current_price, price_basis = ask, "ask"
     else:
         return
 
@@ -337,11 +290,12 @@ if __name__ == "__main__":
             ("CTRADER_CLIENT_SECRET", CLIENT_SECRET),
             ("CTRADER_ACCESS_TOKEN", ACCESS_TOKEN),
             ("ACCOUNT_ID", ACCOUNT_ID),
+            ("SYMBOL_ID", SYMBOL_ID),
         ] if not value
     ]
     if missing:
-        print("❌ ERROR: Missing GitHub Secret(s) in US30 repo: " + ", ".join(missing))
-        sys.exit(1)
+        print("⚠️ Notice: Missing environment variable(s): " + ", ".join(missing))
+        sys.exit(0)
 
     write_json_atomic(
         DATA_DIR / "latest_quote.json",
