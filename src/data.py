@@ -36,7 +36,10 @@ def get_env_int(*keys, default=0):
 CLIENT_ID = get_env_str("CTRADER_CLIENT_ID", "CLIENT_ID", "CTRADER_ID", "APP_CLIENT_ID")
 CLIENT_SECRET = get_env_str("CTRADER_CLIENT_SECRET", "CLIENT_SECRET", "CTRADER_SECRET", "APP_CLIENT_SECRET")
 ACCESS_TOKEN = get_env_str("CTRADER_ACCESS_TOKEN", "ACCESS_TOKEN", "CTRADER_TOKEN", "TOKEN")
-ACCOUNT_ID = get_env_int("ACCOUNT_ID", "CTRADER_ACCOUNT_ID", "CTID_TRADER_ACCOUNT_ID", default=0)
+
+# 👇 REPLACE YOUR_ACCOUNT_ID_HERE WITH YOUR ACTUAL NUMERIC CTRADER ACCOUNT ID (e.g., 12345678)
+ACCOUNT_ID = get_env_int("ACCOUNT_ID", "CTRADER_ACCOUNT_ID", "CTID_TRADER_ACCOUNT_ID", default=YOUR_ACCOUNT_ID_HERE)
+
 SYMBOL_ID = get_env_int("SYMBOL_ID", "CTRADER_SYMBOL_ID", default=1287)  # US30 Symbol ID = 1287
 CTRADER_ENV = get_env_str("CTRADER_ENV", "CTRADER_ACCOUNT_ENV", default="live").lower()
 DATA_DIR = Path(get_env_str("DATA_DIR", default="."))
@@ -143,7 +146,7 @@ def on_app_auth(_result):
 
 
 def on_account_auth(_result):
-    print(f"cTrader account authenticated. Requesting latest M5 bars & live spot for US30 (Symbol ID {SYMBOL_ID})...")
+    print(f"cTrader account authenticated. Requesting latest M5 bars & live spot for Symbol ID {SYMBOL_ID}...")
     start_market_data_requests()
 
 
