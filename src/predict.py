@@ -143,7 +143,7 @@ def init_db_table(conn, table_name):
         """)
     conn.commit()
 
-def send_telegram_alert(tf, signal, price_0d, entry_zone, eq_0d, rsi, stretch_pct):
+def send_telegram_alert(tf, signal, price_0d, entry_zone, eq_0d, ema_0d, rsi, stretch_pct):
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not (bot_token and chat_id and signal in ["BUY", "SELL"]):
@@ -155,7 +155,7 @@ def send_telegram_alert(tf, signal, price_0d, entry_zone, eq_0d, rsi, stretch_pc
         f"========================\n"
         f"{icon} *SIGNAL: {signal}*\n"
         f"💰 *Live Price:* {price_0d:.0f}\n"
-        f"🏁 *Equilibrium TP:* {eq_0d:.0f}\n"
+        f"🏁 *Midline:* {eq_0d:.0f} | *EMA:* {ema_0d:.0f}\n"
         f"📍 *Limit Tiers:* {entry_zone}\n"
         f"📊 *Stretch:* {stretch_pct:.1f}% | *RSI:* {rsi:.1f}"
     )
@@ -238,6 +238,7 @@ def predict_for_timeframe(conn, raw_df, tf, live_spot):
 
     price_0d = round(price, 0)
     eq_0d = round(midline_eq, 0)
+    ema_0d = round(anchor_ema, 0)
 
     entry_zone = (
         f"B0.55:{b_055:.0f},B0.80:{b_080:.0f},B1.00:{b_100:.0f} | "
@@ -247,7 +248,7 @@ def predict_for_timeframe(conn, raw_df, tf, live_spot):
     # True Stretch % from Equilibrium toward outer limit (55.0%+ triggers BUY/SELL)
     stretch_pct = min((abs(price - midline_eq) / max(half_range, 1.0)) * 100.0, 100.0)
 
-    reason = f"Bias:{stretch_pct:.1f}% | RSI:{rsi:.1f} | EQ:{eq_0d:.0f}"
+    reason = f"Bias:{stretch_pct:.1f}% | RSI:{rsi:.1f} | EQ:{eq_0d:.0f} | EMA:{ema_0d:.0f}"
     run_ts = datetime.datetime.now(datetime.timezone.utc)
 
     init_db_table(conn, table_name)
@@ -259,12 +260,12 @@ def predict_for_timeframe(conn, raw_df, tf, live_spot):
         """, (run_ts, price_0d, signal, reason, entry_zone, price_0d, eq_0d))
     conn.commit()
     print(
-        f"[{tf.upper()}] {signal} @ {price_0d:.0f} (Spot: {price:.2f}) | AnchorEMA:{anchor_ema:.0f} | "
+        f"[{tf.upper()}] {signal} @ {price_0d:.0f} (Spot: {price:.2f}) | AnchorEMA:{ema_0d:.0f} | "
         f"Buy(0.55/0.8/1.0): {b_055:.0f}/{b_080:.0f}/{b_100:.0f} | "
-        f"Sell(0.55/0.8/1.0): {s_055:.0f}/{s_080:.0f}/{s_100:.0f} | EQ/TP: {eq_0d:.0f} | Stretch: {stretch_pct:.1f}%"
+        f"Sell(0.55/0.8/1.0): {s_055:.0f}/{s_080:.0f}/{s_100:.0f} | Midline: {eq_0d:.0f} | Stretch: {stretch_pct:.1f}%"
     )
 
-    send_telegram_alert(tf, signal, price_0d, entry_zone, eq_0d, rsi, stretch_pct)
+    send_telegram_alert(tf, signal, price_0d, entry_zone, eq_0d, ema_0d, rsi, stretch_pct)
 
 if __name__ == "__main__":
     live_spot = get_live_spot_quote()
