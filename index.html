@@ -35,7 +35,7 @@
             </div>
         </div>
 
-        <!-- Dual Timeframe Grid (30M & 4H on One Screen) -->
+        <!-- Dual Timeframe Grid (30M -> Buttons in the Middle -> 4H) -->
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
             <!-- ================= 30-MINUTE (30M) ENGINE ================= -->
@@ -106,6 +106,18 @@
                         </div>
                     </div>
                 </div>
+            </div>
+
+            <!-- ================= MIDDLE BUTTONS AREA (BETWEEN 30M & 4H) ================= -->
+            <div class="lg:col-span-2 flex flex-col sm:flex-row justify-center gap-4 py-1">
+                <button id="refresh-btn" onclick="fetchData(true)" class="px-6 py-3 bg-sky-600 hover:bg-sky-500 text-white rounded-full font-semibold transition-colors shadow-[0_0_15px_rgba(2,132,199,0.5)]">
+                    Refresh Data
+                </button>
+
+                <!-- FORCE RUN BUTTON -->
+                <button id="force-btn" onclick="forceRun()" class="px-6 py-3 bg-amber-600 hover:bg-amber-500 text-white rounded-full font-semibold transition-colors shadow-[0_0_15px_rgba(217,119,6,0.5)] flex items-center justify-center gap-2">
+                    <span>⚡ Force Engine Run</span>
+                </button>
             </div>
 
             <!-- ================= 4-HOUR (4H) ENGINE ================= -->
@@ -179,18 +191,6 @@
             </div>
 
         </div>
-
-        <!-- Buttons Area -->
-        <div class="flex flex-col sm:flex-row justify-center gap-4 mt-8">
-            <button id="refresh-btn" onclick="fetchData(true)" class="px-6 py-3 bg-sky-600 hover:bg-sky-500 text-white rounded-full font-semibold transition-colors shadow-[0_0_15px_rgba(2,132,199,0.5)]">
-                Refresh Data
-            </button>
-
-            <!-- FORCE RUN BUTTON -->
-            <button id="force-btn" onclick="forceRun()" class="px-6 py-3 bg-amber-600 hover:bg-amber-500 text-white rounded-full font-semibold transition-colors shadow-[0_0_15px_rgba(217,119,6,0.5)] flex items-center justify-center gap-2">
-                <span>⚡ Force Engine Run</span>
-            </button>
-        </div>
     </div>
 
     <script>
@@ -199,6 +199,10 @@
             {
                 url: "https://nabjqvmgytcnlezyxnly.supabase.co",
                 key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5hYmpxdm1neXRjbmxlenl4bmx5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA5MDg1MzcsImV4cCI6MjEwNjQ4NDUzN30.HRR0_Yu6xIUE7DAdqvPJlUOu37Gkz8xX6g4rsIVN98I"
+            },
+            {
+                url: "https://gtezyactopcdfeyiyrzz.supabase.co",
+                key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd0ZXp5YWN0b3BjZGZleWl5cnp6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE2ODE5MzcsImV4cCI6MjEwNzI1NzkzN30.o1lNY8NKe86xhTBxw0bzYGRYkZBigfyO2iE6f-Z5dJU"
             }
         ];
 
@@ -235,11 +239,8 @@
 
             const rsiText = rsiMatch ? Number(rsiMatch[1]).toFixed(1) : (row.rsi !== undefined ? Number(row.rsi).toFixed(1) : "--");
             const biasText = biasMatch
-                ? (biasMatch[1].endsWith("%") ? biasMatch[1] : `${biasMatch[1]}%`)
-                : (row.stretch_pct !== undefined ? `${Number(row.stretch_pct).toFixed(1)}%` : "--");
-            document.getElementById(`meta-val-${tf}`).innerText = `RSI: ${rsiText} | Stretch: ${biasText}`;
-
-            const statusEl = document.getElementById(`status-val-${tf}`);
+                ? (biasMatch[1].endsWith("%") ? biasMatch[1] : `${biasMatch[1]}\%`) : (row.stretch_pct !== undefined ? `${Number(row.stretch_pct).toFixed(1)}%` : "--");
+            document.getElementById(`meta-val-${tf}`).innerText = `RSI: ${rsiText} | Stretch: ${biasText}`;  const statusEl = document.getElementById(`status-val-${tf}`);
             if (statusEl) {
                 if (row.status === "HIT_TP" || row.status === "TP_HIT") {
                     statusEl.innerText = "HIT TP ✓";
@@ -297,16 +298,11 @@
                 }
             }
 
-            document.getElementById(`buy-055-${tf}`).innerText = b055 || "--";
-            document.getElementById(`buy-080-${tf}`).innerText = b080 || "--";
-            document.getElementById(`buy-100-${tf}`).innerText = b100 || "--";
+            document.getElementById(`buy-055-${tf}`).innerText = b055 \vert{}\vert{} "--"; document.getElementById(`buy-080-${tf}`).innerText = b080 || "--";
+            document.getElementById(`buy-100-${tf}`).innerText = b100 \vert{}\vert{} "--";  document.getElementById(`sell-055-${tf}`).innerText = s055 || "--";
+            document.getElementById(`sell-080-${tf}`).innerText = s080 \vert{}\vert{} "--"; document.getElementById(`sell-100-${tf}`).innerText = s100 || "--";
 
-            document.getElementById(`sell-055-${tf}`).innerText = s055 || "--";
-            document.getElementById(`sell-080-${tf}`).innerText = s080 || "--";
-            document.getElementById(`sell-100-${tf}`).innerText = s100 || "--";
-
-            document.getElementById(`tp-val-${tf}`).innerText = eqFormatted;
-            document.getElementById(`ema-val-${tf}`).innerText = emaFormatted;
+            document.getElementById(`tp-val-${tf}`).innerText = eqFormatted; document.getElementById(`ema-val-${tf}`).innerText = emaFormatted;
         }
 
         async function fetchTableLatest(tableName) {
@@ -314,12 +310,7 @@
             for (const proj of SUPABASE_PROJECTS) {
                 for (const order of orderings) {
                     try {
-                        const url = `${proj.url}/rest/v1/${tableName}?select=*&order=${order}&limit=1`;
-                        const response = await fetch(url, {
-                            cache: 'no-store',
-                            headers: {
-                                'apikey': proj.key,
-                                'Authorization': `Bearer ${proj.key}`
+                        const url = `${proj.url}/rest/v1/${tableName}?select=*&order=${order}&limit=1`; const response = await fetch(url, { cache: 'no-store', headers: { 'apikey': proj.key, 'Authorization': `Bearer ${proj.key}`
                             }
                         });
                         if (response.ok) {
@@ -338,8 +329,7 @@
 
         async function fetchJsonStateFallback() {
             const urls = [
-                `./live_state.json?t=${Date.now()}`,
-                `https://raw.githubusercontent.com/${GITHUB_USERNAME}/${GITHUB_REPO}/main/live_state.json?t=${Date.now()}`
+                `./live_state.json?t=${Date.now()}`, `https://raw.githubusercontent.com/${GITHUB_USERNAME}/${GITHUB_REPO}/main/live_state.json?t=${Date.now()}`
             ];
             for (const url of urls) {
                 try {
@@ -430,11 +420,7 @@
                 outerLoop:
                 for (const repoName of reposToTry) {
                     for (const wf of workflows) {
-                        response = await fetch(`https://api.github.com/repos/${GITHUB_USERNAME}/${repoName}/actions/workflows/${wf}/dispatches`, {
-                            method: "POST",
-                            headers: {
-                                "Accept": "application/vnd.github+json",
-                                "Authorization": `Bearer ${token}`,
+                        response = await fetch(`https://api.github.com/repos/${GITHUB_USERNAME}/${repoName}/actions/workflows/${wf}/dispatches`, { method: "POST", headers: { "Accept": "application/vnd.github+json", "Authorization": `Bearer ${token}`,
                                 "Content-Type": "application/json"
                             },
                             body: JSON.stringify({ ref: "main" }) 
@@ -451,39 +437,4 @@
 
                     const pollTimer = setInterval(async () => {
                         remaining -= 5;
-                        btn.innerHTML = `<span>⏳ Running Engine (${Math.max(remaining, 0)}s)...</span>`;
-                        await fetchData(false);
-
-                        if ((latestKnownRunIso && latestKnownRunIso !== prevRunIso) || remaining <= 0) {
-                            clearInterval(pollTimer);
-                            btn.innerHTML = "<span>✅ Updated!</span>";
-                            btn.disabled = false;
-                            setTimeout(() => { btn.innerHTML = originalText; }, 2500);
-                        }
-                    }, 5000);
-                } else {
-                    const errData = response ? await response.json().catch(() => ({})) : { message: "Workflow not found" };
-                    if (response && (response.status === 401 || response.status === 403)) {
-                        localStorage.removeItem("github_pat");
-                        localStorage.removeItem("github_pat_us30");
-                        localStorage.removeItem("github_pat_jp225");
-                        alert(`❌ Token unauthorized or expired. Cleared from memory—click again to enter a new token.`);
-                    } else {
-                        alert("Error: " + (errData.message || "Failed to trigger workflow."));
-                    }
-                    btn.innerHTML = originalText;
-                    btn.disabled = false;
-                }
-            } catch (error) {
-                console.error(error);
-                alert("Network error. Could not reach GitHub API.");
-                btn.innerHTML = originalText;
-                btn.disabled = false;
-            }
-        }
-
-        fetchData();
-        setInterval(() => fetchData(false), 30000);
-    </script>
-</body>
-</html>
+                        btn.innerHTML = `<span>
