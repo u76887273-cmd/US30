@@ -3,7 +3,6 @@ import psycopg
 import pandas as pd
 
 DB_URL = os.environ.get("DATABASE_URL")
-WINDOW_BARS = 24  # 24 x 5-min bars = 2 Hours
 
 def load_bars():
     if DB_URL:
@@ -17,63 +16,60 @@ def load_bars():
         raise FileNotFoundError("Provide DATABASE_URL or data_m5.csv")
 
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-    df["high"] = pd.to_numeric(df["high"], errors="coerce")
-    df["low"] = pd.to_numeric(df["low"], errors="coerce")
-    return (
-        df.dropna()
-        .drop_duplicates(subset=["timestamp"], keep="last")
-        .sort_values("timestamp")
-        .reset_index(drop=True)
-    )
+    for col in ["high", "low"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.dropna().drop_duplicates(subset=["timestamp"], keep="last").sort_values("timestamp").reset_index(drop=True)
 
 def analyze_quiet_hours():
     df = load_bars()
 
-    # Forward 2-hour (24-bar) rolling High - Low range
-    indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=WINDOW_BARS)
-    df["high_2h"] = df["high"].rolling(window=indexer).max()
-    df["low_2h"] = df["low"].rolling(window=indexer).min()
+    # 1-Hour (12 bars) and 2-Hour (24 bars) forward rolling windows
+    idx_1h = pd.api.indexers.FixedForwardWindowIndexer(window_size=12)
+    idx_2h = pd.api.indexers.FixedForwardWindowIndexer(window_size=24)
+
+    df["high_1h"] = df["high"].rolling(window=idx_1h).max()
+    df["low_1h"] = df["low"].rolling(window=idx_1h).min()
+    df["range_1h"] = df["high_1h"] - df["low_1h"]
+
+    df["high_2h"] = df["high"].rolling(window=idx_2h).max()
+    df["low_2h"] = df["low"].rolling(window=idx_2h).min()
     df["range_2h"] = df["high_2h"] - df["low_2h"]
 
-    # Drop incomplete trailing window and weekend gaps (> 2h15m elapsed across 24 bars)
-    df["span_mins"] = (df["timestamp"].shift(-(WINDOW_BARS - 1)) - df["timestamp"]).dt.total_seconds() / 60.0
-    valid = df.iloc[:-WINDOW_BARS].copy()
-    valid = valid[valid["span_mins"] <= 135].dropna(subset=["range_2h"])
+    # Drop trailing incomplete windows and large time gaps
+    df["span_mins"] = (df["timestamp"].shift(-23) - df["timestamp"]).dt.total_seconds() / 60.0
+    valid = df.iloc[:-24].copy()
+    valid = valid[valid["span_mins"] <= 135].dropna(subset=["range_1h", "range_2h"])
 
-    valid["utc_hour"] = valid["timestamp"].dt.hour
     valid["cairo_hour"] = valid["timestamp"].dt.tz_convert("Africa/Cairo").dt.hour
-    valid["under_100"] = (valid["range_2h"] <= 100.0).astype(float) * 100.0
-    valid["under_200"] = (valid["range_2h"] <= 200.0).astype(float) * 100.0
+    
+    # Calculate percentages for staying under 100 points
+    valid["1h_under_100"] = (valid["range_1h"] <= 100.0).astype(float) * 100.0
+    valid["2h_under_100"] = (valid["range_2h"] <= 100.0).astype(float) * 100.0
 
     summary = (
-        valid.groupby("utc_hour")
+        valid.groupby("cairo_hour")
         .agg(
-            cairo_hour=("cairo_hour", lambda x: x.mode().iloc[0]),
-            samples=("range_2h", "count"),
-            avg_range=("range_2h", "mean"),
-            median_range=("range_2h", "median"),
-            pct_under_100=("under_100", "mean"),
-            pct_under_200=("under_200", "mean"),
+            avg_1h=("range_1h", "mean"),
+            avg_2h=("range_2h", "mean"),
+            pct_1h_under_100=("1h_under_100", "mean"),
+            pct_2h_under_100=("2h_under_100", "mean"),
         )
         .reset_index()
-        .sort_values(by=["pct_under_100", "avg_range"], ascending=[False, True])
+        .sort_values(by=["pct_2h_under_100", "avg_2h"], ascending=[False, True])
     )
 
-    print("=" * 82)
-    print("US30 QUIETEST 2-HOUR WINDOWS (RANKED BY % TIME <= 100 PTS & <= 200 PTS)")
-    print("=" * 82)
-    print(f"{'UTC Hour':<10} | {'Cairo Hour':<12} | {'Avg 2H Pts':<11} | {'Med 2H Pts':<11} | {'<= 100 Pts':<11} | {'<= 200 Pts':<11}")
-    print("-" * 82)
+    print("=" * 76)
+    print(f"{'Cairo Time':<12} | {'Avg 1H Pts':<12} | {'Avg 2H Pts':<12} | {'1H <= 100':<11} | {'2H <= 100':<11}")
+    print("-" * 76)
     for _, row in summary.iterrows():
         print(
-            f"{int(row['utc_hour']):02d}:00 UTC | "
             f"{int(row['cairo_hour']):02d}:00 Cairo | "
-            f"{row['avg_range']:>9.1f}   | "
-            f"{row['median_range']:>9.1f}   | "
-            f"{row['pct_under_100']:>8.1f}%  | "
-            f"{row['pct_under_200']:>8.1f}%"
+            f"{row['avg_1h']:>10.1f} | "
+            f"{row['avg_2h']:>10.1f} | "
+            f"{row['pct_1h_under_100']:>9.1f}% | "
+            f"{row['pct_2h_under_100']:>9.1f}%"
         )
-    print("=" * 82)
+    print("=" * 76)
 
 if __name__ == "__main__":
     analyze_quiet_hours()
