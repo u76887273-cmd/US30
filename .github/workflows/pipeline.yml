@@ -107,3 +107,7 @@ jobs:
 
       - name: 3. Run AI Prediction Engine
         run: python src/predict.py
+
+      - name: Analyze Quiet Hours
+        run: python src/quiet_hours.py
+
