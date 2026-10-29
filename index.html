@@ -35,7 +35,7 @@
             </div>
         </div>
 
-        <!-- Dual Timeframe Grid (30M & 4H on One Screen) -->
+        <!-- Dual Timeframe Grid (30M -> Buttons in the Middle -> 4H) -->
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
             <!-- ================= 30-MINUTE (30M) ENGINE ================= -->
@@ -108,6 +108,18 @@
                 </div>
             </div>
 
+            <!-- ================= MIDDLE BUTTONS AREA (BETWEEN 30M & 4H) ================= -->
+            <div class="lg:col-span-2 flex flex-col sm:flex-row justify-center gap-4 py-1">
+                <button id="refresh-btn" onclick="fetchData(true)" class="px-6 py-3 bg-sky-600 hover:bg-sky-500 text-white rounded-full font-semibold transition-colors shadow-[0_0_15px_rgba(2,132,199,0.5)]">
+                    Refresh Data
+                </button>
+
+                <!-- FORCE RUN BUTTON -->
+                <button id="force-btn" onclick="forceRun()" class="px-6 py-3 bg-amber-600 hover:bg-amber-500 text-white rounded-full font-semibold transition-colors shadow-[0_0_15px_rgba(217,119,6,0.5)] flex items-center justify-center gap-2">
+                    <span>⚡ Force Engine Run</span>
+                </button>
+            </div>
+
             <!-- ================= 4-HOUR (4H) ENGINE ================= -->
             <div class="glass rounded-2xl p-6 shadow-2xl space-y-6">
                 <div class="flex items-center justify-between border-b border-slate-700 pb-4 gap-2">
@@ -178,18 +190,6 @@
                 </div>
             </div>
 
-        </div>
-
-        <!-- Buttons Area -->
-        <div class="flex flex-col sm:flex-row justify-center gap-4 mt-8">
-            <button id="refresh-btn" onclick="fetchData(true)" class="px-6 py-3 bg-sky-600 hover:bg-sky-500 text-white rounded-full font-semibold transition-colors shadow-[0_0_15px_rgba(2,132,199,0.5)]">
-                Refresh Data
-            </button>
-
-            <!-- FORCE RUN BUTTON -->
-            <button id="force-btn" onclick="forceRun()" class="px-6 py-3 bg-amber-600 hover:bg-amber-500 text-white rounded-full font-semibold transition-colors shadow-[0_0_15px_rgba(217,119,6,0.5)] flex items-center justify-center gap-2">
-                <span>⚡ Force Engine Run</span>
-            </button>
         </div>
     </div>
 
